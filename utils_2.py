@@ -272,26 +272,140 @@ def get_sentiment_logits(news_list, ticker, ticker_keywords, relevance_model, to
 
     return logits
 
-def calculate_bayesian_final_probability(pred_type, p_prior, probs_news, p_market, w_market=0.5):
+"""def calculate_bayesian_final_probability(
+    target_type,
+    pred_primary, meta_pred, precision_base, recall_meta, spec_meta,
+    pred_primary_hourly, meta_pred_hourly, precision_base_hourly, recall_meta_hourly, spec_meta_hourly,
+    probs_news, p_market, w_market=0.3
+):
     EPSILON = 1e-9
-    prior_odds = np.log(p_prior / max(1 - p_prior, EPSILON))
-
-    if len(probs_news) > 0:
-        log_lrs = probs_news[:, 2] - probs_news[:, 0]
-        avg_sentiment_score = np.mean(log_lrs)
-    else:
-        avg_sentiment_score = 0.0
-
-    evidence_sentiment = avg_sentiment_score if pred_type == 1 else -avg_sentiment_score
-
+    
+    # 1. Prior
     p_market = np.clip(p_market, EPSILON, 1 - EPSILON)
-    market_log_odds = np.log(p_market / (1 - p_market))
-    evidence_market = market_log_odds * w_market
+    p_prior = p_market * w_market + 0.5 * (1 - w_market)
+    odds_prior = p_prior / (1 - p_prior)
+    
+    # 2. Sentiment
+    if len(probs_news) > 0:
+        # probs_news shape: (N, 3) -> 0: Neg, 1: Neu, 2: Pos
+        sentiment_scores = probs_news[:, 2] - probs_news[:, 0]
+        avg_sentiment = np.mean(sentiment_scores) # in [-1, 1]
+        
+        if target_type == 2: # Put
+            avg_sentiment = -avg_sentiment
+            
+        p_sent = (avg_sentiment + 1) / 2
+        p_sent = np.clip(p_sent, EPSILON, 1 - EPSILON)
+        odds_sent = p_sent / (1 - p_sent)
+    else:
+        avg_sentiment = 0.0
+        odds_sent = 1.0
+        
+    # 3. Model 1 (Daily)
+    if pred_primary == target_type:
+        odds_base = precision_base / max(1 - precision_base, EPSILON)
+        if meta_pred == 1:
+            lr_meta = recall_meta / max(1 - spec_meta, EPSILON)
+        else:
+            lr_meta = (1 - recall_meta) / max(spec_meta, EPSILON)
+        odds_model1 = odds_base * lr_meta
+    elif pred_primary == 0:
+        odds_model1 = 0.5
+    else:
+        odds_model1 = 0.2
+        
+    # 4. Model 2 (Hourly)
+    if pred_primary_hourly == target_type:
+        odds_base_hourly = precision_base_hourly / max(1 - precision_base_hourly, EPSILON)
+        if meta_pred_hourly == 1:
+            lr_meta_hourly = recall_meta_hourly / max(1 - spec_meta_hourly, EPSILON)
+        else:
+            lr_meta_hourly = (1 - recall_meta_hourly) / max(spec_meta_hourly, EPSILON)
+        odds_model2 = odds_base_hourly * lr_meta_hourly
+    elif pred_primary_hourly == 0:
+        odds_model2 = 0.5
+    else:
+        odds_model2 = 0.2
+        
+    # Final Odds
+    odds_final = odds_prior * odds_sent * odds_model1 * odds_model2
+    p_final = odds_final / (1 + odds_final)
+    
+    return p_final, avg_sentiment"""
 
-    final_log_odds = prior_odds + evidence_sentiment + evidence_market
-    p_final = 1 / (1 + np.exp(-final_log_odds))
+def calculate_bayesian_final_probability(
+    target_type,
+    pred_primary, meta_pred, precision_base, recall_meta, spec_meta,
+    pred_primary_hourly, meta_pred_hourly, precision_base_hourly, recall_meta_hourly, spec_meta_hourly,
+    probs_news, p_market, w_market=0.3
+):
+    EPSILON = 1e-9
+    
+    # 1. Prior
+    p_market = np.clip(p_market, EPSILON, 1 - EPSILON)
+    p_prior = p_market * w_market + 0.5 * (1 - w_market)
+    odds_prior = p_prior / (1 - p_prior)
+    
+    # 2. Sentiment
+    if len(probs_news) > 0:
+        # probs_news shape: (N, 3) -> 0: Neg, 1: Neu, 2: Pos
+        sentiment_scores = probs_news[:, 2] - probs_news[:, 0]
+        avg_sentiment = np.mean(sentiment_scores) # in [-1, 1]
+        
+        if target_type == 2: # Put
+            avg_sentiment = -avg_sentiment
+            
+        p_sent = (avg_sentiment + 1) / 2
+        p_sent = np.clip(p_sent, EPSILON, 1 - EPSILON)
+        odds_sent = p_sent / (1 - p_sent)
+    else:
+        avg_sentiment = 0.0
+        odds_sent = 1.0
+        
+    # 3. Model 1 (Daily)
+    if pred_primary == target_type:
+        odds_base = precision_base / max(1 - precision_base, EPSILON)
+        
+        # --- MODIFIED: Meta-model only reinforces. Neutral (1.0) if != 1 ---
+        if meta_pred == 1:
+            lr_meta = recall_meta / max(1 - spec_meta, EPSILON)
+        else:
+            lr_meta = 1.0 
+            
+        odds_model1 = odds_base * lr_meta
+    elif pred_primary == 0:
+        odds_model1 = 0.5
+    else:
+        odds_model1 = 0.2
+        
+    # 4. Model 2 (Hourly)
+    if pred_primary_hourly == target_type:
+        odds_base_hourly = precision_base_hourly / max(1 - precision_base_hourly, EPSILON)
+        
+        # --- MODIFIED: Meta-model only reinforces. Neutral (1.0) if != 1 ---
+        if meta_pred_hourly == 1:
+            lr_meta_hourly = recall_meta_hourly / max(1 - spec_meta_hourly, EPSILON)
+        else:
+            lr_meta_hourly = 1.0
+            
+        odds_model2 = odds_base_hourly * lr_meta_hourly
+    elif pred_primary_hourly == 0:
+        odds_model2 = 0.5
+    else:
+        odds_model2 = 0.2
+        
+    # --- MODIFIED: Penalty for opposed primary predictions ---
+    odds_conflict = 1.0
+    if (pred_primary == 1 and pred_primary_hourly == 2) or (pred_primary == 2 and pred_primary_hourly == 1):
+        odds_conflict = 0.5  # Halves the odds, decreasing the final probability. 
+                             # (If any of them is 0, this block is skipped, keeping the neutral 1.0 effect)
+        
+    # Final Odds
+    odds_final = odds_prior * odds_sent * odds_model1 * odds_model2 * odds_conflict
+    p_final = odds_final / (1 + odds_final)
+    
+    return p_final, avg_sentiment
 
-    return p_final, avg_sentiment_score
 
 def calcular_probabilidad_teorica(S, K, T_dias, r, sigma, tipo='call'):
     if T_dias <= 0 or sigma <= 0: return 0.0
@@ -313,8 +427,8 @@ def get_barrier_probabilities(y_ticker, barrier, option_type='call', r=0.044):
 
     target_strike = (S_spot + barrier) / 2
     hoy = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-    fecha_min = hoy + timedelta(days=6)
-    fecha_max = hoy + timedelta(days=15)
+    fecha_min = hoy + timedelta(days=11)
+    fecha_max = hoy + timedelta(days=22)
 
     try: expiraciones = y_ticker.options
     except: return pd.DataFrame()
