@@ -1,0 +1,12 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "type": "command",
+        "command": "python3 .github/hooks/pre_tool_boundary.py",
+        "cwd": "/home/david/Documents/trade",
+        "timeout": 15
+      }
+    ]
+  }
+}

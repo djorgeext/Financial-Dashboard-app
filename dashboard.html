@@ -1,0 +1,731 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Financial Dashboard</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        :root {
+            --color-primary: #1f1f1f;
+            --color-secondary: #2d2d2d;
+            --color-tertiary: #3d3d3d;
+            --color-accent: #00d9ff;
+            --color-bullish: #00ff41;
+            --color-bearish: #ff3366;
+            --color-neutral: #fff44f;
+            --text-light: #e0e0e0;
+            --text-dark: #a0a0a0;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--color-primary);
+            color: var(--text-light);
+            overflow-x: hidden;
+        }
+        
+        /* Header */
+        header {
+            background: linear-gradient(135deg, var(--color-secondary) 0%, var(--color-tertiary) 100%);
+            padding: 20px 40px;
+            border-bottom: 2px solid var(--color-accent);
+            box-shadow: 0 2px 10px rgba(0, 217, 255, 0.1);
+        }
+        
+        h1 {
+            color: var(--color-accent);
+            font-size: 2em;
+            margin-bottom: 5px;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+        }
+        
+        .subtitle {
+            color: var(--text-dark);
+            font-size: 0.9em;
+        }
+        
+        /* Main container */
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 30px 20px;
+        }
+        
+        /* Status bar */
+        .status-bar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: var(--color-secondary);
+            padding: 15px 20px;
+            border-radius: 8px;
+            margin-bottom: 30px;
+            border-left: 4px solid var(--color-accent);
+        }
+        
+        .status-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .status-indicator {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: var(--color-bullish);
+            animation: pulse 2s infinite;
+        }
+        
+        .status-indicator.error {
+            background: var(--color-bearish);
+            animation: none;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        
+        .timestamp {
+            color: var(--text-dark);
+            font-size: 0.85em;
+        }
+        
+        /* Grid layout */
+        .sectors-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+            gap: 25px;
+            margin-bottom: 40px;
+        }
+        
+        /* Card styles */
+        .card {
+            background: var(--color-secondary);
+            border: 1px solid var(--color-tertiary);
+            border-radius: 12px;
+            padding: 25px;
+            overflow: hidden;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
+        }
+        
+        .card:hover {
+            border-color: var(--color-accent);
+            box-shadow: 0 8px 25px rgba(0, 217, 255, 0.15);
+            transform: translateY(-2px);
+        }
+        
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 2px solid var(--color-tertiary);
+        }
+        
+        .card-title {
+            font-size: 1.3em;
+            color: var(--color-accent);
+            font-weight: bold;
+        }
+        
+        .sector-label {
+            background: var(--color-tertiary);
+            padding: 5px 12px;
+            border-radius: 20px;
+            font-size: 0.8em;
+            color: var(--text-dark);
+        }
+        
+        /* Metric styles */
+        .metric {
+            margin-bottom: 20px;
+        }
+        
+        .metric-label {
+            font-size: 0.85em;
+            color: var(--text-dark);
+            margin-bottom: 5px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        
+        .metric-value {
+            font-size: 1.5em;
+            font-weight: bold;
+            color: var(--text-light);
+        }
+        
+        .metric-change {
+            font-size: 0.9em;
+            margin-top: 5px;
+        }
+        
+        .metric-change.positive {
+            color: var(--color-bullish);
+        }
+        
+        .metric-change.negative {
+            color: var(--color-bearish);
+        }
+        
+        .metric-change.neutral {
+            color: var(--color-neutral);
+        }
+        
+        /* Price section */
+        .price-section {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+        
+        .price-card {
+            background: var(--color-tertiary);
+            padding: 15px;
+            border-radius: 8px;
+            border-left: 4px solid var(--color-accent);
+        }
+        
+        .price-current {
+            font-size: 1.8em;
+            font-weight: bold;
+            color: var(--color-accent);
+        }
+        
+        /* Forecast widget */
+        .forecast {
+            background: var(--color-tertiary);
+            padding: 20px;
+            border-radius: 8px;
+            margin: 20px 0;
+            border: 1px solid var(--color-tertiary);
+        }
+        
+        .forecast-trend {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            margin-bottom: 15px;
+        }
+        
+        .trend-indicator {
+            font-size: 2em;
+            font-weight: bold;
+            min-width: 60px;
+            text-align: center;
+            padding: 10px;
+            border-radius: 8px;
+        }
+        
+        .trend-indicator.up {
+            background: rgba(0, 255, 65, 0.2);
+            color: var(--color-bullish);
+        }
+        
+        .trend-indicator.down {
+            background: rgba(255, 51, 102, 0.2);
+            color: var(--color-bearish);
+        }
+        
+        .trend-indicator.neutral {
+            background: rgba(255, 244, 79, 0.2);
+            color: var(--color-neutral);
+        }
+        
+        .trend-info {
+            flex: 1;
+        }
+        
+        .trend-label {
+            font-size: 0.9em;
+            color: var(--text-dark);
+        }
+        
+        .trend-confidence {
+            font-size: 1.1em;
+            font-weight: bold;
+            color: var(--text-light);
+            margin-top: 5px;
+        }
+        
+        .confidence-bar {
+            width: 100%;
+            height: 8px;
+            background: var(--color-secondary);
+            border-radius: 4px;
+            overflow: hidden;
+            margin-top: 8px;
+        }
+        
+        .confidence-fill {
+            height: 100%;
+            background: linear-gradient(90deg, var(--color-accent), var(--color-bullish));
+            border-radius: 4px;
+            transition: width 0.3s ease;
+        }
+        
+        /* Sentiment widget */
+        .sentiment {
+            background: var(--color-tertiary);
+            padding: 20px;
+            border-radius: 8px;
+            margin: 20px 0;
+        }
+        
+        .sentiment-score {
+            display: flex;
+            justify-content: space-around;
+            margin-bottom: 15px;
+        }
+        
+        .sentiment-badge {
+            text-align: center;
+            padding: 10px;
+            border-radius: 8px;
+            flex: 1;
+            margin: 0 5px;
+        }
+        
+        .sentiment-badge.bullish {
+            background: rgba(0, 255, 65, 0.15);
+            border: 1px solid var(--color-bullish);
+        }
+        
+        .sentiment-badge.bearish {
+            background: rgba(255, 51, 102, 0.15);
+            border: 1px solid var(--color-bearish);
+        }
+        
+        .sentiment-badge.neutral {
+            background: rgba(255, 244, 79, 0.15);
+            border: 1px solid var(--color-neutral);
+        }
+        
+        .sentiment-value {
+            font-weight: bold;
+            margin-top: 5px;
+        }
+        
+        .sentiment-summary {
+            font-size: 0.9em;
+            color: var(--text-light);
+            line-height: 1.5;
+            padding-top: 15px;
+            border-top: 1px solid var(--color-tertiary);
+        }
+        
+        /* Signals */
+        .signals {
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid var(--color-tertiary);
+        }
+        
+        .signal-label {
+            font-size: 0.85em;
+            color: var(--text-dark);
+            margin-bottom: 10px;
+            text-transform: uppercase;
+        }
+        
+        .signal-item {
+            display: inline-block;
+            background: var(--color-secondary);
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 0.8em;
+            margin: 3px 5px 3px 0;
+            border: 1px solid var(--color-tertiary);
+        }
+        
+        .signal-item.bullish {
+            border-color: var(--color-bullish);
+            color: var(--color-bullish);
+        }
+        
+        .signal-item.bearish {
+            border-color: var(--color-bearish);
+            color: var(--color-bearish);
+        }
+        
+        /* Loading state */
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: var(--text-dark);
+        }
+        
+        .spinner {
+            display: inline-block;
+            width: 40px;
+            height: 40px;
+            border: 4px solid var(--color-tertiary);
+            border-top-color: var(--color-accent);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        /* Error state */
+        .error {
+            background: rgba(255, 51, 102, 0.1);
+            border-color: var(--color-bearish) !important;
+            color: var(--color-bearish);
+            padding: 15px;
+            border-radius: 8px;
+            margin: 15px 0;
+            font-size: 0.9em;
+        }
+        
+        /* Responsive */
+        @media (max-width: 768px) {
+            .container {
+                padding: 15px;
+            }
+            
+            .sectors-grid {
+                grid-template-columns: 1fr;
+            }
+            
+            h1 {
+                font-size: 1.5em;
+            }
+            
+            header {
+                padding: 15px 20px;
+            }
+            
+            .price-section {
+                grid-template-columns: 1fr;
+            }
+            
+            .status-bar {
+                flex-direction: column;
+                gap: 15px;
+                align-items: flex-start;
+            }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>📊 Financial Dashboard</h1>
+        <p class="subtitle">Real-time market data, ML forecasts & sentiment analysis</p>
+    </header>
+    
+    <div class="container">
+        <!-- Status Bar -->
+        <div class="status-bar">
+            <div>
+                <div class="status-item">
+                    <div class="status-indicator" id="status-indicator"></div>
+                    <span>System Status: <strong id="status-text">Initializing...</strong></span>
+                </div>
+            </div>
+            <div class="timestamp" id="timestamp">Loading...</div>
+        </div>
+        
+        <!-- Loading indicator (shown initially) -->
+        <div id="loading" class="loading">
+            <div class="spinner"></div>
+            <p>Loading dashboard data...</p>
+        </div>
+        
+        <!-- Dashboard Content -->
+        <div id="dashboard" style="display: none;">
+            <div class="sectors-grid" id="sectors-container"></div>
+        </div>
+    </div>
+    
+    <script>
+        // ==================== CONFIG & UTILITIES ====================
+        const API_BASE = '/api';
+        const REFRESH_INTERVAL = 5 * 60 * 1000; // 5 minutes
+        
+        // ==================== UI UTILITIES ====================
+        function formatPrice(price) {
+            if (!price) return 'N/A';
+            return new Intl.NumberFormat('en-US', {
+                style: 'currency',
+                currency: 'USD',
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2
+            }).format(price);
+        }
+        
+        function formatPercent(value) {
+            if (value === null || value === undefined) return 'N/A';
+            const sign = value >= 0 ? '+' : '';
+            return sign + value.toFixed(2) + '%';
+        }
+        
+        function getChangeClass(value) {
+            if (value > 0) return 'positive';
+            if (value < 0) return 'negative';
+            return 'neutral';
+        }
+        
+        function getTrendClass(trend) {
+            if (trend === 'up') return 'up';
+            if (trend === 'down') return 'down';
+            return 'neutral';
+        }
+        
+        function getTrendEmoji(trend) {
+            if (trend === 'up') return '📈';
+            if (trend === 'down') return '📉';
+            return '➡️';
+        }
+        
+        function updateTimestamp() {
+            const now = new Date().toLocaleTimeString('en-US', {
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit'
+            });
+            document.getElementById('timestamp').textContent = `Last updated: ${now}`;
+        }
+        
+        // ==================== DATA FETCHING ====================
+        async function fetchDashboardData() {
+            try {
+                const response = await fetch(`${API_BASE}/dashboard`);
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+                return await response.json();
+            } catch (error) {
+                console.error('Error fetching dashboard data:', error);
+                showError(`Failed to fetch data: ${error.message}`);
+                return null;
+            }
+        }
+        
+        async function checkHealth() {
+            try {
+                const response = await fetch(`${API_BASE}/../health`);
+                return response.ok;
+            } catch {
+                return false;
+            }
+        }
+        
+        // ==================== RENDERING ====================
+        function renderDashboard(data) {
+            const container = document.getElementById('sectors-container');
+            container.innerHTML = '';
+            
+            if (!data || !data.sectors) {
+                showError('No data received');
+                return;
+            }
+            
+            Object.entries(data.sectors).forEach(([sectorKey, sectorData]) => {
+                const cardHtml = renderSectorCard(sectorKey, sectorData);
+                container.innerHTML += cardHtml;
+            });
+            
+            // Show dashboard, hide loading
+            document.getElementById('loading').style.display = 'none';
+            document.getElementById('dashboard').style.display = 'block';
+            
+            // Update status
+            updateStatus(true);
+            updateTimestamp();
+        }
+        
+        function renderSectorCard(sectorKey, data) {
+            const displayName = data.display_name || sectorKey.toUpperCase();
+            const financial = data.financial || {};
+            const forecast = data.forecast || {};
+            const news = data.news || {};
+            
+            // Get first ticker for display
+            const ticker = Object.keys(financial)[0] || 'N/A';
+            const priceData = financial[ticker] || {};
+            
+            const currentPrice = priceData.current_price || 0;
+            const change = priceData.change || 0;
+            const changePct = priceData.change_pct || 0;
+            const high24h = priceData.high_24h || 0;
+            const low24h = priceData.low_24h || 0;
+            
+            const trend = forecast.trend || 'neutral';
+            const confidence = forecast.confidence || 0;
+            const classes = forecast.classes || {};
+            
+            const sentiment = news.sentiment || 'neutral';
+            const sentimentScore = news.sentiment_score || 0;
+            const signals = news.signals || [];
+            const summary = news.summary || '';
+            
+            const changeClass = getChangeClass(change);
+            const trendClass = getTrendClass(trend);
+            const trendEmoji = getTrendEmoji(trend);
+            
+            return `
+                <div class="card">
+                    <div class="card-header">
+                        <h2 class="card-title">${displayName}</h2>
+                        <span class="sector-label">${ticker}</span>
+                    </div>
+                    
+                    <!-- Price Section -->
+                    <div class="price-section">
+                        <div class="price-card">
+                            <div class="metric-label">Current Price</div>
+                            <div class="price-current">${formatPrice(currentPrice)}</div>
+                        </div>
+                        <div class="price-card">
+                            <div class="metric-label">24h Change</div>
+                            <div class="metric-change ${changeClass}">
+                                ${formatPercent(changePct)}
+                            </div>
+                            <div style="font-size: 0.8em; color: var(--text-dark); margin-top: 5px;">
+                                Range: ${formatPrice(low24h)} - ${formatPrice(high24h)}
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Forecast Widget -->
+                    <div class="forecast">
+                        <div class="metric-label" style="margin-bottom: 15px;">Price Forecast (Daily)</div>
+                        <div class="forecast-trend">
+                            <div class="trend-indicator ${trendClass}">
+                                ${trendEmoji}
+                            </div>
+                            <div class="trend-info">
+                                <div class="trend-label">Predicted Trend</div>
+                                <div class="trend-confidence">${trend.toUpperCase()}</div>
+                                <div class="confidence-bar">
+                                    <div class="confidence-fill" style="width: ${confidence * 100}%"></div>
+                                </div>
+                                <div style="font-size: 0.8em; color: var(--text-dark); margin-top: 5px;">
+                                    Confidence: ${(confidence * 100).toFixed(1)}%
+                                </div>
+                            </div>
+                        </div>
+                        <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; font-size: 0.85em;">
+                            <div style="text-align: center; padding: 8px; background: rgba(255, 51, 102, 0.1); border-radius: 4px;">
+                                <div style="color: var(--text-dark);">Down</div>
+                                <div style="color: var(--text-light); font-weight: bold;">
+                                    ${(classes.down * 100).toFixed(1)}%
+                                </div>
+                            </div>
+                            <div style="text-align: center; padding: 8px; background: rgba(255, 244, 79, 0.1); border-radius: 4px;">
+                                <div style="color: var(--text-dark);">Neutral</div>
+                                <div style="color: var(--text-light); font-weight: bold;">
+                                    ${(classes.neutral * 100).toFixed(1)}%
+                                </div>
+                            </div>
+                            <div style="text-align: center; padding: 8px; background: rgba(0, 255, 65, 0.1); border-radius: 4px;">
+                                <div style="color: var(--text-dark);">Up</div>
+                                <div style="color: var(--text-light); font-weight: bold;">
+                                    ${(classes.up * 100).toFixed(1)}%
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Sentiment Widget -->
+                    <div class="sentiment">
+                        <div class="metric-label" style="margin-bottom: 15px;">News Sentiment</div>
+                        <div class="sentiment-score">
+                            <div class="sentiment-badge bearish" style="opacity: ${sentiment === 'bearish' ? 1 : 0.5}">
+                                <div style="font-size: 1.2em;">📉</div>
+                                <div class="sentiment-value">BEARISH</div>
+                            </div>
+                            <div class="sentiment-badge neutral" style="opacity: ${sentiment === 'neutral' ? 1 : 0.5}">
+                                <div style="font-size: 1.2em;">➡️</div>
+                                <div class="sentiment-value">NEUTRAL</div>
+                            </div>
+                            <div class="sentiment-badge bullish" style="opacity: ${sentiment === 'bullish' ? 1 : 0.5}">
+                                <div style="font-size: 1.2em;">📈</div>
+                                <div class="sentiment-value">BULLISH</div>
+                            </div>
+                        </div>
+                        <div class="sentiment-summary">
+                            <strong>Score:</strong> ${sentimentScore.toFixed(2)} | ${summary || 'Analysis in progress'}
+                        </div>
+                        ${signals.length > 0 ? `
+                            <div class="signals">
+                                <div class="signal-label">Identified Signals</div>
+                                ${signals.map(sig => `
+                                    <span class="signal-item">🎯 ${sig}</span>
+                                `).join('')}
+                            </div>
+                        ` : ''}
+                    </div>
+                </div>
+            `;
+        }
+        
+        function showError(message) {
+            const container = document.getElementById('sectors-container') || document.getElementById('dashboard');
+            const errorHtml = `<div class="error">⚠️ ${message}</div>`;
+            if (container) {
+                container.innerHTML = errorHtml;
+            }
+        }
+        
+        function updateStatus(isHealthy) {
+            const indicator = document.getElementById('status-indicator');
+            const text = document.getElementById('status-text');
+            if (isHealthy) {
+                indicator.classList.remove('error');
+                text.textContent = 'Operational';
+            } else {
+                indicator.classList.add('error');
+                text.textContent = 'Unavailable';
+            }
+        }
+        
+        // ==================== INITIALIZATION & AUTO-REFRESH ====================
+        async function initializeDashboard() {
+            updateTimestamp();
+            const isHealthy = await checkHealth();
+            updateStatus(isHealthy);
+            
+            if (isHealthy) {
+                const data = await fetchDashboardData();
+                if (data) {
+                    renderDashboard(data);
+                }
+            } else {
+                showError('Dashboard API is not responding');
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('dashboard').style.display = 'block';
+            }
+        }
+        
+        // Initialize on page load
+        window.addEventListener('DOMContentLoaded', initializeDashboard);
+        
+        // Auto-refresh every 5 minutes
+        setInterval(async () => {
+            const data = await fetchDashboardData();
+            if (data) {
+                renderDashboard(data);
+            }
+        }, REFRESH_INTERVAL);
+        
+        // Manual refresh button in console
+        window.manualRefresh = initializeDashboard;
+    </script>
+</body>
+</html>
