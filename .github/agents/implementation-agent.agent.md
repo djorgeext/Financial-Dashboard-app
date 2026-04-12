@@ -3,7 +3,7 @@ name: implementation-agent
 description: "Use only for implementation tasks: add features, fix bugs, refactor safely, and write focused tests. Planning and review must be handled by other agents."
 argument-hint: "Describe the implementation task, affected files, constraints, and acceptance criteria."
 tools: [read, search, edit, execute, todo, agent, web]
-model: "Claude Haiku 4.5 (copilot)"
+model: "GPT-5.3-Codex (copilot)"
 user-invocable: false
 disable-model-invocation: false
 ---

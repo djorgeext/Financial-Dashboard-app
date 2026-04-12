@@ -2,7 +2,7 @@
 name: "Planning Agent"
 description: "Use when planning a stock-forecast website with FastAPI plus React, using INFERENCE_v3.ipynb for forecast calculations, news_analysis_2.ipynb for news analysis, and wireframe.png as the UI source."
 tools: [read, search]
-model: "GPT-5.3-Codex Xhigh"
+model: "GPT-5.3-Codex (copilot)"
 argument-hint: "Describe your website goal, target users, and any FastAPI plus React constraints. Planning must follow INFERENCE_v3 + news_analysis_2 pipelines and wireframe.png layout."
 user-invocable: true
 ---

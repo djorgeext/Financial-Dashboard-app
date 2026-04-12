@@ -75,7 +75,12 @@ class TestHealthEndpoints:
         assert response.status_code in [200, 503]
         
         data = response.json()
-        assert "status" in data
+        if response.status_code == 200:
+            assert "status" in data
+        else:
+            assert data["status_code"] == 503
+            assert "error" in data
+            assert "timestamp" in data
 
 
 class TestFinancialDataEndpoints:
@@ -123,6 +128,34 @@ class TestForecastEndpoints:
         data = response.json()
         assert data["sector"] == "banks"
         assert data["granularity"] == "hourly"
+
+    def test_hourly_ticker_route_not_captured_by_generic_forecast_route(self, client):
+        """Regression test: /api/forecast/hourly/{ticker} should never fail with granularity 422."""
+        response = client.get("/api/forecast/hourly/BAC")
+        assert response.status_code != 422
+        assert response.status_code in [200, 400, 500, 503]
+
+    def test_hourly_ticker_route_returns_hourly_handler_payload(self, client, monkeypatch):
+        """Regression test: /api/forecast/hourly/{ticker} must route to hourly ticker handler."""
+        mock_inference = Mock()
+        mock_inference.forecast_hourly.return_value = {
+            "ticker": "BAC",
+            "sector": "banks",
+            "status": "success",
+            "last_40_hours": [{"timestamp": "2026-04-12T00:00:00", "close": 40.0}],
+            "forecast_10_hours": [{"timestamp": "2026-04-12T01:00:00", "forecast": 40.5}]
+        }
+
+        monkeypatch.setattr(app_module, "inference_service", mock_inference)
+
+        response = client.get("/api/forecast/hourly/BAC")
+        assert response.status_code == 200
+
+        data = response.json()
+        assert data["ticker"] == "BAC"
+        assert "forecast_10_hours" in data
+        assert "last_40_hours" in data
+        mock_inference.forecast_hourly.assert_called_once_with("BAC")
     
     def test_forecast_invalid_granularity(self, client):
         """Test forecast with invalid granularity."""
@@ -163,6 +196,67 @@ class TestNewsEndpoints:
         """Test news for invalid sector."""
         response = client.get("/api/news/invalid_news_sector")
         assert response.status_code == 400
+
+    def test_ticker_news_endpoint_unambiguous_path(self, client):
+        """Test ticker news endpoint uses dedicated path without clashing with sector route."""
+        response = client.get("/api/news/ticker/AAPL")
+        assert response.status_code == 200
+
+        data = response.json()
+        assert data["ticker"] == "AAPL"
+        assert "sentiment" in data
+        assert "status" in data
+        assert "application/json" in response.headers.get("content-type", "")
+
+    def test_ticker_news_endpoint_structure_and_status_with_explicit_context(self, client, monkeypatch):
+        """Ensure ticker endpoint returns JSON structure and forwards explicit news_items context."""
+        mock_inference = Mock()
+        mock_inference.get_sector_ticker_mapping.return_value = {
+            "sectors": {
+                "tech": {"tickers": ["AAPL", "MSFT"]}
+            }
+        }
+
+        mock_news = Mock()
+        mock_news.analyze_news.return_value = {
+            "sentiment": "bullish",
+            "sentiment_score": 0.7,
+            "signals": ["Positive guidance"],
+            "summary": "Constructive momentum",
+            "timestamp": "2026-04-12T00:00:00",
+            "status": "success"
+        }
+
+        monkeypatch.setattr(app_module, "inference_service", mock_inference)
+        monkeypatch.setattr(app_module, "news_service", mock_news)
+
+        response = client.get("/api/news/ticker/AAPL")
+        assert response.status_code == 200
+        assert "application/json" in response.headers.get("content-type", "")
+
+        data = response.json()
+        assert data["ticker"] == "AAPL"
+        assert data["sector"] == "tech"
+        assert data["status"] == "success"
+        assert "sentiment" in data
+        assert "key_signals" in data
+
+        mock_news.analyze_news.assert_called_once()
+        args, _ = mock_news.analyze_news.call_args
+        assert args[0] == "tech"
+        assert isinstance(args[1], list)
+        assert len(args[1]) > 0
+        assert any("AAPL" in item for item in args[1])
+
+    def test_news_ticker_literal_still_routes_to_sector_endpoint(self, client):
+        """Ensure /api/news/ticker still maps to sector endpoint semantics."""
+        response = client.get("/api/news/ticker")
+        assert response.status_code == 400
+
+        data = response.json()
+        assert data["status_code"] == 400
+        assert "error" in data
+        assert "timestamp" in data
 
 
 class TestAggregatedDashboardEndpoint:
@@ -245,6 +339,17 @@ class TestErrorHandling:
         response = client.get("/api/forecast/tech/daily?invalid_param=bad_value")
         # Should ignore extra params or handle gracefully
         assert response.status_code in [200, 422]
+
+    def test_http_exception_response_is_json(self, client):
+        """Ensure HTTP exceptions are returned as JSON responses by middleware."""
+        response = client.get("/api/forecast/invalid_xyz/daily")
+        assert response.status_code == 400
+        assert "application/json" in response.headers.get("content-type", "")
+
+        data = response.json()
+        assert data["status_code"] == 400
+        assert "error" in data
+        assert "timestamp" in data
 
 
 class TestCORSHeaders:

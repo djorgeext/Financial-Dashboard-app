@@ -4,7 +4,7 @@ description: "Use for autonomous delivery: delegate implementation and review, r
 argument-hint: "Describe the goal, constraints, and acceptance criteria."
 tools: [agent, todo, read, search, edit, execute, web]
 agents: [implementation-agent, reviewer-agent]
-model: "Claude Haiku 4.5 (copilot)"
+model: "GPT-5.3-Codex (copilot)"
 user-invocable: true
 disable-model-invocation: false
 ---

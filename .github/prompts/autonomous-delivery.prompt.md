@@ -3,7 +3,7 @@ name: Autonomous Delivery
 description: "Run implementation and review autonomously through delivery-orchestrator."
 argument-hint: "Describe the goal, constraints, and acceptance criteria."
 agent: "delivery-orchestrator"
-model: "Claude Haiku 4.5 (copilot)"
+model: "GPT-5.3-Codex (copilot)"
 tools: [agent, todo, read, search, edit, execute]
 ---
 

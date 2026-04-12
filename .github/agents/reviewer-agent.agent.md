@@ -3,7 +3,7 @@ name: reviewer-agent
 description: "Use only for review tasks: analyze code changes, identify bugs and risks, and provide actionable findings. Implementation and planning must be handled by other agents."
 argument-hint: "Describe what to review (PR, diff, files, or branch) and any review criteria."
 tools: [read, search, edit, execute, todo, agent, web]
-model: "Claude Haiku 4.5 (copilot)"
+model: "GPT-5.3-Codex (copilot)"
 user-invocable: false
 disable-model-invocation: false
 ---
