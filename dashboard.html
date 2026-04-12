@@ -33,6 +33,16 @@
         #chartContainer { width: 100%; height: 450px; border-radius: 8px; background: rgba(15, 23, 42, 0.5); }
         .error-message { background: rgba(239, 68, 68, 0.1); border-left: 4px solid #ef4444; color: #fca5a5; padding: 15px; margin-bottom: 20px; }
         .no-data { text-align: center; padding: 40px; color: #94a3b8; }
+        .table-wrap { overflow-x: auto; }
+        .results-table { width: 100%; border-collapse: collapse; min-width: 1250px; }
+        .results-table th, .results-table td { border-bottom: 1px solid #334155; padding: 8px 10px; text-align: left; font-size: 0.84rem; }
+        .results-table th { color: #bfdbfe; background: rgba(15, 23, 42, 0.7); position: sticky; top: 0; }
+        .news-list { margin-top: 10px; }
+        .news-item { margin-bottom: 8px; color: #cbd5e1; }
+        @media (max-width: 900px) {
+            .controls { grid-template-columns: 1fr; }
+            #chartContainer { height: 360px; }
+        }
     </style>
 </head>
 <body>
@@ -94,6 +104,7 @@
                 });
                 sel.addEventListener('change', changeSector);
                 document.getElementById('runButton').addEventListener('click', runAnalysis);
+                changeSector();
             } catch(e) { console.error('Init error:', e); }
         }
         function changeSector() {
@@ -160,38 +171,371 @@
                     throw new Error(getApiErrorMessage(nd, 'Invalid news response'));
                 }
                 drawNews(nd);
+                const formattedLastUpdate = lastUpdatedFormatter.format(new Date());
+                document.getElementById('lastUpdate').innerHTML = '<span>Last updated: <strong>' + formattedLastUpdate + '</strong></span>';
             } catch(e) {
                 errorContainer.innerHTML = '<div class="error-message">Error: ' + e.message + '</div>';
             } finally {
                 btn.disabled = false;
             }
         }
+        function parseChartTimestamp(value) {
+            if (value instanceof Date && !Number.isNaN(value.getTime())) {
+                return value;
+            }
+
+            if (typeof value === 'number') {
+                const numericDate = new Date(value);
+                if (!Number.isNaN(numericDate.getTime())) {
+                    return numericDate;
+                }
+            }
+
+            if (typeof value === 'string') {
+                const trimmed = value.trim();
+                if (!trimmed) {
+                    return null;
+                }
+
+                const directDate = new Date(trimmed);
+                if (!Number.isNaN(directDate.getTime())) {
+                    return directDate;
+                }
+
+                if (trimmed.includes(' ') && !trimmed.includes('T')) {
+                    const normalizedDate = new Date(trimmed.replace(' ', 'T'));
+                    if (!Number.isNaN(normalizedDate.getTime())) {
+                        return normalizedDate;
+                    }
+                }
+            }
+
+            return null;
+        }
+        const lastUpdatedFormatter = new Intl.DateTimeFormat('en-US', {
+            timeZone: 'America/New_York',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: false
+        });
+        const chartTickFormatter = new Intl.DateTimeFormat('en-US', {
+            timeZone: 'America/New_York',
+            day: '2-digit',
+            month: 'short',
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false
+        });
+        function formatChartTickLabel(timestamp) {
+            const date = parseChartTimestamp(timestamp);
+            if (!date) {
+                return '';
+            }
+
+            const parts = chartTickFormatter.formatToParts(date);
+            const day = parts.find(p => p.type === 'day')?.value || '';
+            const month = parts.find(p => p.type === 'month')?.value || '';
+            const hour = parts.find(p => p.type === 'hour')?.value || '';
+            const minute = parts.find(p => p.type === 'minute')?.value || '';
+
+            return day + ' ' + month + '\n' + hour + ':' + minute;
+        }
+        function buildChartTickConfig(indexLabels, rangeStart, rangeEnd, targetTickCount) {
+            if (!Array.isArray(indexLabels) || !indexLabels.length) {
+                return { tickvals: [], ticktext: [] };
+            }
+
+            const minIndex = 0;
+            const maxIndex = indexLabels.length - 1;
+
+            const start = Number.isFinite(rangeStart)
+                ? Math.max(minIndex, Math.floor(rangeStart))
+                : minIndex;
+            const end = Number.isFinite(rangeEnd)
+                ? Math.min(maxIndex, Math.ceil(rangeEnd))
+                : maxIndex;
+
+            const safeEnd = end >= start ? end : start;
+            const visibleCount = safeEnd - start + 1;
+            const tickGoal = Math.max(2, Math.min(12, Number.isFinite(targetTickCount) ? Math.round(targetTickCount) : 4));
+            const step = Math.max(1, Math.ceil((visibleCount - 1) / Math.max(1, tickGoal - 1)));
+            const tickvals = [];
+
+            for (let i = start; i <= safeEnd; i += step) {
+                tickvals.push(i);
+            }
+            if (tickvals[tickvals.length - 1] !== safeEnd) {
+                tickvals.push(safeEnd);
+            }
+
+            return {
+                tickvals,
+                ticktext: tickvals.map(index => indexLabels[index])
+            };
+        }
+        function buildAdaptiveTickTarget(visibleCount) {
+            if (!Number.isFinite(visibleCount) || visibleCount <= 0) {
+                return 4;
+            }
+
+            return Math.min(12, Math.max(4, Math.round(20 / Math.sqrt(visibleCount))));
+        }
         function drawChart() {
             if (!state.forecastData?.last_40_hours) return;
             const h = state.forecastData.last_40_hours;
             const f = state.forecastData.forecast_10_hours || [];
-            const cd = { x: h.map(x=>x.timestamp), open: h.map(x=>x.open), high: h.map(x=>x.high), low: h.map(x=>x.low), close: h.map(x=>x.close), type: 'candlestick', name: 'Historical' };
-            const fd = { x: f.map(x=>x.timestamp), y: f.map(x=>x.forecast), type: 'scatter', mode: 'lines', name: 'Forecast', line: {color: '#06b6d4'} };
-            const layout = { title: state.currentTicker + ' - OHLC & Forecast', template: 'plotly_dark', paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(30, 41, 59, 0.3)', font: {color: '#cbd5e1'} };
-            Plotly.newPlot('chartContainer', [cd, fd], layout, {responsive: true});
+
+            const historicalPoints = h.map(point => {
+                const timestamp = parseChartTimestamp(point.timestamp);
+                const open = Number(point.open);
+                const high = Number(point.high);
+                const low = Number(point.low);
+                const close = Number(point.close);
+
+                if (
+                    !timestamp
+                    || !Number.isFinite(open)
+                    || !Number.isFinite(high)
+                    || !Number.isFinite(low)
+                    || !Number.isFinite(close)
+                ) {
+                    return null;
+                }
+
+                return {
+                    timestamp,
+                    open,
+                    high,
+                    low,
+                    close,
+                    ohlcAvg: (open + high + low + close) / 4
+                };
+            }).filter(Boolean).sort((a, b) => a.timestamp - b.timestamp);
+
+            const forecastPoints = f.map(point => {
+                const timestamp = parseChartTimestamp(point.timestamp);
+                const forecast = Number(point.forecast);
+
+                if (!timestamp || !Number.isFinite(forecast)) {
+                    return null;
+                }
+
+                return { timestamp, forecast };
+            }).filter(Boolean).sort((a, b) => a.timestamp - b.timestamp);
+
+            if (!historicalPoints.length) {
+                return;
+            }
+
+            const historicalIndices = historicalPoints.map((_, index) => index);
+            const forecastIndices = forecastPoints.map((_, index) => historicalPoints.length + index);
+            const indexLabels = historicalPoints
+                .map(point => formatChartTickLabel(point.timestamp))
+                .concat(forecastPoints.map(point => formatChartTickLabel(point.timestamp)));
+            const initialTickConfig = buildChartTickConfig(indexLabels, null, null, 4);
+
+            const historical = {
+                x: historicalIndices,
+                open: historicalPoints.map(point => point.open),
+                high: historicalPoints.map(point => point.high),
+                low: historicalPoints.map(point => point.low),
+                close: historicalPoints.map(point => point.close),
+                type: 'candlestick',
+                name: 'Historical',
+                increasing: { line: { color: '#22c55e' } },
+                decreasing: { line: { color: '#ef4444' } }
+            };
+
+            const historicalAvgLine = {
+                x: historicalIndices,
+                y: historicalPoints.map(point => point.ohlcAvg),
+                type: 'scatter',
+                mode: 'lines',
+                name: 'OHLC Avg',
+                connectgaps: true,
+                line: { color: '#f8fafc', width: 2 }
+            };
+
+            const lastHistoricalPoint = historicalPoints[historicalPoints.length - 1];
+            const lastHistoricalIndex = historicalPoints.length - 1;
+            const forecastX = [lastHistoricalIndex].concat(forecastIndices);
+            const forecastY = [lastHistoricalPoint.ohlcAvg].concat(forecastPoints.map(point => point.forecast));
+
+            const forecastLine = {
+                x: forecastX,
+                y: forecastY,
+                type: 'scatter',
+                mode: 'lines+markers',
+                name: 'Forecast',
+                connectgaps: true,
+                line: { color: '#22d3ee', width: 2, dash: 'dash' }
+            };
+            const barrier = Number(state.forecastData?.barrier_hourly || 0);
+            const allIndices = historicalIndices.concat(forecastIndices);
+            const shapes = barrier > 0 ? [{
+                type: 'line',
+                xref: 'x',
+                yref: 'y',
+                x0: allIndices[0],
+                x1: allIndices[allIndices.length - 1],
+                y0: barrier,
+                y1: barrier,
+                line: { color: '#f59e0b', width: 1, dash: 'dot' }
+            }] : [];
+
+            const layout = {
+                title: state.currentTicker + ' - OHLC & Forecast',
+                template: 'plotly_dark',
+                paper_bgcolor: 'rgba(0,0,0,0)',
+                plot_bgcolor: 'rgba(30, 41, 59, 0.3)',
+                font: { color: '#cbd5e1' },
+                margin: { l: 45, r: 20, t: 45, b: 35 },
+                xaxis: {
+                    type: 'linear',
+                    rangeslider: { visible: false },
+                    tickmode: 'array',
+                    tickvals: initialTickConfig.tickvals,
+                    ticktext: initialTickConfig.ticktext
+                },
+                yaxis: { fixedrange: false },
+                shapes
+            };
+            Plotly.newPlot('chartContainer', [historical, historicalAvgLine, forecastLine], layout, { responsive: true, displaylogo: false })
+                .then(graph => {
+                    graph.on('plotly_relayout', relayoutData => {
+                        const hasExplicitRange = Object.prototype.hasOwnProperty.call(relayoutData || {}, 'xaxis.range[0]')
+                            || Array.isArray(relayoutData?.['xaxis.range']);
+                        const hasAutorange = relayoutData?.['xaxis.autorange'] === true;
+
+                        if (!hasExplicitRange && !hasAutorange) {
+                            return;
+                        }
+
+                        const range = Array.isArray(relayoutData?.['xaxis.range']) ? relayoutData['xaxis.range'] : null;
+                        const rangeStart = Number(relayoutData?.['xaxis.range[0]'] ?? (range ? range[0] : Number.NaN));
+                        const rangeEnd = Number(relayoutData?.['xaxis.range[1]'] ?? (range ? range[1] : Number.NaN));
+
+                        const adaptiveTarget = Number.isFinite(rangeStart) && Number.isFinite(rangeEnd)
+                            ? buildAdaptiveTickTarget(Math.abs(rangeEnd - rangeStart) + 1)
+                            : 4;
+                        const adaptiveTickConfig = buildChartTickConfig(indexLabels, rangeStart, rangeEnd, adaptiveTarget);
+
+                        Plotly.relayout(graph, {
+                            'xaxis.tickvals': adaptiveTickConfig.tickvals,
+                            'xaxis.ticktext': adaptiveTickConfig.ticktext
+                        });
+                    });
+                });
         }
         function drawOptions(d) {
-            if (!d.suggested_options?.length) { document.getElementById('optionsContainer').innerHTML = '<div class="no-data">No options</div>'; return; }
-            let html = '<table style="width:100%;border-collapse:collapse"><tr><th>Type</th><th>Strike</th><th>Exp</th><th>Rec</th><th>Prob</th></tr>';
-            d.suggested_options.forEach(o => {
-                html += '<tr><td>' + o.option_type + '</td><td>' + (o.strike || o.call_strike) + '</td><td>' + o.expiration + '</td><td>' + o.recommendation + '</td><td>' + Math.round(o.probability * 100) + '%</td></tr>';
+            const container = document.getElementById('optionsContainer');
+            while (container.firstChild) {
+                container.removeChild(container.firstChild);
+            }
+
+            const rows = Array.isArray(d.table_rows) ? d.table_rows : [];
+            const suggestedOptions = Array.isArray(d.suggested_options) ? d.suggested_options : [];
+            if (!rows.length && !suggestedOptions.length) {
+                const empty = document.createElement('div');
+                empty.className = 'no-data';
+                empty.textContent = 'No options for current market chain. Try another ticker.';
+                container.appendChild(empty);
+                return;
+            }
+            const usePrimaryRows = rows.length > 0;
+            const columns = usePrimaryRows
+                ? [
+                    'Fecha', 'Sector', 'Ticker', 'Tipo', 'Precio Actual', 'Barrera', 'Barrera a 10 hrs',
+                    'Vencimiento', 'Strike', 'Ask', 'IV', 'Prob. Mercado', 'Prob. Final (Bayes)', 'Sentimiento Score'
+                ]
+                : ['option_type', 'strike', 'expiration', 'ask', 'iv', 'market_probability', 'probability', 'recommendation'];
+            const rowsToRender = usePrimaryRows ? rows : suggestedOptions;
+
+            const tableWrap = document.createElement('div');
+            tableWrap.className = 'table-wrap';
+
+            const table = document.createElement('table');
+            table.className = 'results-table';
+
+            const headerRow = document.createElement('tr');
+            columns.forEach(c => {
+                const th = document.createElement('th');
+                th.textContent = c;
+                headerRow.appendChild(th);
             });
-            html += '</table>';
-            document.getElementById('optionsContainer').innerHTML = html;
+            table.appendChild(headerRow);
+
+            rowsToRender.forEach(r => {
+                const rowEl = document.createElement('tr');
+                columns.forEach(c => {
+                    const v = r[c];
+                    const cell = document.createElement('td');
+                    cell.textContent = v === undefined || v === null ? '-' : String(v);
+                    rowEl.appendChild(cell);
+                });
+                table.appendChild(rowEl);
+            });
+
+            tableWrap.appendChild(table);
+            container.appendChild(tableWrap);
         }
         function drawNews(d) {
-            if (!d || typeof d !== 'object' || d.error) { document.getElementById('newsContainer').innerHTML = '<div class="no-data">No news</div>'; return; }
+            const container = document.getElementById('newsContainer');
+            while (container.firstChild) {
+                container.removeChild(container.firstChild);
+            }
+
+            if (!d || typeof d !== 'object' || d.error) {
+                const empty = document.createElement('div');
+                empty.className = 'no-data';
+                empty.textContent = 'No news';
+                container.appendChild(empty);
+                return;
+            }
+
             const ticker = d.ticker || 'N/A';
             const sentiment = d.sentiment || 'neutral';
             const score = typeof d.sentiment_score === 'number' ? Math.round(d.sentiment_score * 100) : 0;
             const summary = d.summary || 'No summary available';
-            const html = '<div><strong>' + ticker + '</strong> | ' + sentiment + ' | ' + score + '%<br>' + summary + '</div>';
-            document.getElementById('newsContainer').innerHTML = html;
+            const signals = Array.isArray(d.key_signals) ? d.key_signals.slice(0, 4) : [];
+            const topNews = Array.isArray(d.news_summaries) ? d.news_summaries.slice(0, 3) : [];
+
+            const header = document.createElement('div');
+            const strongTicker = document.createElement('strong');
+            strongTicker.textContent = ticker;
+            header.appendChild(strongTicker);
+            header.appendChild(document.createTextNode(' | ' + sentiment + ' | ' + score + '%'));
+            header.appendChild(document.createElement('br'));
+            header.appendChild(document.createTextNode(summary));
+            container.appendChild(header);
+
+            if (signals.length) {
+                const signalsDiv = document.createElement('div');
+                signalsDiv.className = 'news-list';
+                const signalsLabel = document.createElement('strong');
+                signalsLabel.textContent = 'Signals:';
+                signalsDiv.appendChild(signalsLabel);
+                signalsDiv.appendChild(document.createTextNode(' ' + signals.map(s => String(s)).join(' | ')));
+                container.appendChild(signalsDiv);
+            }
+
+            if (topNews.length) {
+                const topNewsDiv = document.createElement('div');
+                topNewsDiv.className = 'news-list';
+                const topNewsLabel = document.createElement('strong');
+                topNewsLabel.textContent = 'Top news:';
+                topNewsDiv.appendChild(topNewsLabel);
+
+                topNews.forEach(n => {
+                    const itemDiv = document.createElement('div');
+                    itemDiv.className = 'news-item';
+                    itemDiv.textContent = '- ' + (n && n.title ? String(n.title) : 'Untitled');
+                    topNewsDiv.appendChild(itemDiv);
+                });
+
+                container.appendChild(topNewsDiv);
+            }
         }
     </script>
 </body>

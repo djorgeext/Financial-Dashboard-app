@@ -1,30 +1,39 @@
 """
-Inference service for running hourly forecasts based on INFERENCE_v3.ipynb pipeline.
-Handles model loading, feature engineering, and OHLC forecast generation.
+Inference service for single-ticker forecasting and options analysis.
+Implements the INFERENCE_v3 notebook pipeline with robust API-friendly fallbacks.
 """
 import logging
 import os
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
+
+import joblib
+import numpy as np
+import pandas as pd
 import torch
 import torch.nn.functional as F
-import pandas as pd
-import numpy as np
-import joblib
 import xgboost as xgb
-from typing import Dict, List, Optional, Tuple
-from datetime import datetime, timedelta, timezone
 import yfinance as yf
 
 from utils_2 import (
     LSTMMixedModel,
-    engineer_features,
     apply_robust_normalization,
-    get_drift,
-    yang_zhang_volatility,
+    calculate_bayesian_final_probability,
+    engineer_features,
+    get_barrier_probabilities,
 )
 
 logger = logging.getLogger(__name__)
 
-# Sector configuration extracted from INFERENCE_v3.ipynb
+SEQ_LEN_DAILY = 20
+SEQ_LEN_HOURLY = 40
+TBM_HORIZON_DAILY = 2
+TBM_HORIZON_HOURLY = 10
+TBM_K = 1
+MIN_INFERENCE_BUFFER = 20
+MARKET_TIMEZONE = "America/New_York"
+
 SECTORS_CONFIG = {
     "tech": {
         "display_name": "Technology",
@@ -34,17 +43,34 @@ SECTORS_CONFIG = {
             "meta": "meta_model_xgb_tech.json",
             "lstm_hourly": "tech_us_model_hourly.pth",
             "scaler_hourly": "scalers_tech_us_hourly.pkl",
-            "meta_hourly": "meta_model_xgb_tech_hourly.json"
+            "meta_hourly": "meta_model_xgb_tech_hourly.json",
         },
         "bayesian": {
-            "p_call": 0.3965, "p_put": 0.3918,
-            "sensitivity": 0.2, "specificity": 0.92
+            "p_call": 0.3965,
+            "p_put": 0.3918,
+            "sensitivity": 0.2,
+            "specificity": 0.92,
         },
         "bayesian_hourly": {
-            "p_call": 0.4305, "p_put": 0.4031,
-            "sensitivity": 0.42, "specificity": 0.84
+            "p_call": 0.4305,
+            "p_put": 0.4031,
+            "sensitivity": 0.42,
+            "specificity": 0.84,
         },
-        "tickers": ["QQQ", "META", "AAPL", "AMZN", "NFLX", "TSLA", "NVDA", "PLTR", "MSFT", "GOOGL", "INTC", "AMD"],
+        "tickers": [
+            "QQQ",
+            "META",
+            "AAPL",
+            "AMZN",
+            "NFLX",
+            "TSLA",
+            "NVDA",
+            "PLTR",
+            "MSFT",
+            "GOOGL",
+            "INTC",
+            "AMD",
+        ],
     },
     "banks": {
         "display_name": "Banks",
@@ -54,15 +80,19 @@ SECTORS_CONFIG = {
             "meta": "meta_model_xgb_banks.json",
             "lstm_hourly": "banks_model_hourly.pth",
             "scaler_hourly": "scalers_banks_hourly.pkl",
-            "meta_hourly": "meta_model_xgb_banks_hourly.json"
+            "meta_hourly": "meta_model_xgb_banks_hourly.json",
         },
         "bayesian": {
-            "p_call": 0.4199, "p_put": 0.394,
-            "sensitivity": 0.32, "specificity": 0.89
+            "p_call": 0.4199,
+            "p_put": 0.394,
+            "sensitivity": 0.32,
+            "specificity": 0.89,
         },
         "bayesian_hourly": {
-            "p_call": 0.5163, "p_put": 0.4631,
-            "sensitivity": 0.61, "specificity": 0.75
+            "p_call": 0.5163,
+            "p_put": 0.4631,
+            "sensitivity": 0.61,
+            "specificity": 0.75,
         },
         "tickers": ["BAC", "JPM", "WFC", "C", "XLF", "TNA"],
     },
@@ -74,418 +104,863 @@ SECTORS_CONFIG = {
             "meta": "meta_model_xgb_mining.json",
             "lstm_hourly": "mining_model_hourly.pth",
             "scaler_hourly": "scalers_mining_hourly.pkl",
-            "meta_hourly": "meta_model_xgb_mining_hourly.json"
+            "meta_hourly": "meta_model_xgb_mining_hourly.json",
         },
         "bayesian": {
-            "p_call": 0.3896, "p_put": 0.3783,
-            "sensitivity": 0.16, "specificity": 0.92
+            "p_call": 0.3896,
+            "p_put": 0.3783,
+            "sensitivity": 0.16,
+            "specificity": 0.92,
         },
         "bayesian_hourly": {
-            "p_call": 0.5261, "p_put": 0.52,
-            "sensitivity": 0.65, "specificity": 0.68
+            "p_call": 0.5261,
+            "p_put": 0.52,
+            "sensitivity": 0.65,
+            "specificity": 0.68,
         },
         "tickers": ["GLD", "SLV", "NEM", "HL", "PAAS", "NUE", "CLF"],
-    }
+    },
 }
 
 
 class InferenceService:
-    """Service for running inference with pre-trained models."""
-    
+    """Service for notebook-aligned inference and options analysis."""
+
     def __init__(self, model_dir: str = "models"):
-        """
-        Initialize InferenceService with model paths.
-        
-        Args:
-            model_dir: Directory containing trained model files
-        """
         self.model_dir = model_dir
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.models = {}
-        self.scalers = {}
-        self.meta_models = {}
-        
-        logger.info(f"Using device: {self.device}")
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.market_tz = ZoneInfo(MARKET_TIMEZONE)
+
+        self.daily_models: Dict[str, LSTMMixedModel] = {}
+        self.hourly_models: Dict[str, LSTMMixedModel] = {}
+        self.daily_scalers: Dict[str, Dict[str, Any]] = {}
+        self.hourly_scalers: Dict[str, Dict[str, Any]] = {}
+        self.daily_meta_models: Dict[str, Any] = {}
+        self.hourly_meta_models: Dict[str, Any] = {}
+
+        logger.info("Using device: %s", self.device)
         self._load_all_models()
-    
+
+    def _to_market_timezone(self, df: pd.DataFrame) -> pd.DataFrame:
+        if df is None or df.empty:
+            return df
+
+        converted = df.copy()
+        try:
+            idx = pd.to_datetime(converted.index)
+            if not isinstance(idx, pd.DatetimeIndex):
+                return converted
+            if idx.tz is None:
+                converted.index = idx.tz_localize(self.market_tz)
+            else:
+                converted.index = idx.tz_convert(self.market_tz)
+            return converted
+        except Exception:
+            return converted
+
+    def _now_market_iso(self) -> str:
+        return datetime.now(timezone.utc).astimezone(self.market_tz).isoformat()
+
     def _load_all_models(self):
-        """Load all pre-trained models for all sectors."""
-        for sector, config in SECTORS_CONFIG.items():
+        for sector in SECTORS_CONFIG:
             try:
                 self._load_sector_models(sector)
-                logger.info(f"✅ Models loaded for sector: {sector}")
-            except Exception as e:
-                logger.warning(f"⚠️ Error loading models for {sector}: {e}")
-    
+                logger.info("Models loaded for sector: %s", sector)
+            except Exception as exc:
+                logger.warning("Error loading models for %s: %s", sector, exc)
+
+    def _load_lstm_model(self, model_path: str) -> LSTMMixedModel:
+        state_dict = torch.load(model_path, map_location=self.device)
+
+        try:
+            model = LSTMMixedModel(num_features=23, lstm_hidden=64, dropout=0.3)
+            model.load_state_dict(state_dict)
+        except RuntimeError:
+            in_channels = int(state_dict["cnn_block.0.weight"].shape[1])
+            inferred_num_features = in_channels + 1
+            model = LSTMMixedModel(
+                num_features=inferred_num_features,
+                lstm_hidden=64,
+                dropout=0.3,
+            )
+            model.load_state_dict(state_dict)
+
+        model.to(self.device)
+        model.eval()
+        return model
+
+    def _load_xgb_model(self, model_path: str) -> Any:
+        model = xgb.XGBClassifier()
+        model.load_model(model_path)
+        return model
+
     def _load_sector_models(self, sector: str):
-        """Load LSTM and meta-models for a specific sector."""
-        config = SECTORS_CONFIG[sector]
-        model_files = config["model_files"]
-        
-        # Load hourly LSTM model
-        lstm_path = os.path.join(self.model_dir, model_files["lstm_hourly"])
-        if os.path.exists(lstm_path):
-            model = LSTMMixedModel(num_features=22, lstm_hidden=64, dropout=0.3)
-            model.load_state_dict(torch.load(lstm_path, map_location=self.device))
-            model.to(self.device)
-            model.eval()
-            self.models[f"{sector}_lstm"] = model
-            logger.debug(f"Loaded LSTM model for {sector}")
-        
-        # Load hourly scaler
-        scaler_path = os.path.join(self.model_dir, model_files["scaler_hourly"])
-        if os.path.exists(scaler_path):
-            try:
-                scalers = joblib.load(scaler_path)
-                self.scalers[sector] = scalers
-                logger.debug(f"Loaded scalers for {sector}")
-            except Exception as e:
-                logger.warning(f"Error loading scalers for {sector}: {e}")
-        
-        # Load meta-model (XGBoost)
-        meta_path = os.path.join(self.model_dir, model_files["meta_hourly"])
-        if os.path.exists(meta_path):
-            try:
-                meta_model = xgb.XGBClassifier()
-                meta_model.load_model(meta_path)
-                self.meta_models[sector] = meta_model
-                logger.debug(f"Loaded meta-model for {sector}")
-            except Exception as e:
-                logger.warning(f"Error loading meta-model for {sector}: {e}")
-    
-    def get_tickers_by_sector(self, sector: str) -> List[Dict]:
-        """
-        Get tickers and their display names for a sector.
-        
-        Args:
-            sector: Sector key (tech, banks, mining)
-            
-        Returns:
-            List of dicts with 'symbol' and 'name'
-        """
+        cfg = SECTORS_CONFIG[sector]
+        files = cfg["model_files"]
+
+        daily_lstm_path = os.path.join(self.model_dir, files["lstm"])
+        hourly_lstm_path = os.path.join(self.model_dir, files["lstm_hourly"])
+        daily_scaler_path = os.path.join(self.model_dir, files["scaler"])
+        hourly_scaler_path = os.path.join(self.model_dir, files["scaler_hourly"])
+        daily_meta_path = os.path.join(self.model_dir, files["meta"])
+        hourly_meta_path = os.path.join(self.model_dir, files["meta_hourly"])
+
+        if os.path.exists(daily_lstm_path):
+            self.daily_models[sector] = self._load_lstm_model(daily_lstm_path)
+        if os.path.exists(hourly_lstm_path):
+            self.hourly_models[sector] = self._load_lstm_model(hourly_lstm_path)
+
+        if os.path.exists(daily_scaler_path):
+            self.daily_scalers[sector] = joblib.load(daily_scaler_path)
+        if os.path.exists(hourly_scaler_path):
+            self.hourly_scalers[sector] = joblib.load(hourly_scaler_path)
+
+        if os.path.exists(daily_meta_path):
+            self.daily_meta_models[sector] = self._load_xgb_model(daily_meta_path)
+        if os.path.exists(hourly_meta_path):
+            self.hourly_meta_models[sector] = self._load_xgb_model(hourly_meta_path)
+
+    def get_tickers_by_sector(self, sector: str) -> List[Dict[str, str]]:
         sector_lower = sector.lower()
         if sector_lower not in SECTORS_CONFIG:
             return []
-        
-        config = SECTORS_CONFIG[sector_lower]
+
         tickers = []
-        
-        for symbol in config["tickers"]:
+        for symbol in SECTORS_CONFIG[sector_lower]["tickers"]:
             try:
                 ticker_info = yf.Ticker(symbol)
                 name = ticker_info.info.get("longName", symbol)
-            except:
+            except Exception:
                 name = symbol
-            
-            tickers.append({
-                "symbol": symbol,
-                "name": name
-            })
-        
+            tickers.append({"symbol": symbol, "name": name})
         return tickers
-    
-    def get_sector_ticker_mapping(self) -> Dict[str, Dict]:
-        """
-        Get complete mapping of sectors to tickers.
-        
-        Returns:
-            Dict with sector info and available tickers with models
-        """
+
+    def get_sector_ticker_mapping(self) -> Dict[str, Dict[str, Any]]:
         result = {"sectors": {}}
-        
-        for sector, config in SECTORS_CONFIG.items():
+        for sector, cfg in SECTORS_CONFIG.items():
             result["sectors"][sector] = {
-                "display_name": config["display_name"],
-                "tickers": config["tickers"],
-                "model_file": config["model_files"].get("lstm_hourly"),
-                "count": len(config["tickers"])
+                "display_name": cfg["display_name"],
+                "tickers": cfg["tickers"],
+                "model_file": cfg["model_files"].get("lstm_hourly"),
+                "count": len(cfg["tickers"]),
             }
-        
         return result
-    
-    def forecast_hourly(self, ticker: str, sector: str = None) -> Dict:
-        """
-        Generate 10-hour ahead forecast with historical OHLC data.
-        
-        Args:
-            ticker: Stock ticker symbol
-            sector: Optional sector (will be inferred if not provided)
-            
-        Returns:
-            Dict with structure:
-            {
-                "ticker": "JPM",
-                "sector": "banks",
-                "status": "success" | "error",
-                "error": str (if error),
-                "last_40_hours": [
-                    {
-                        "timestamp": ISO string,
-                        "open": float,
-                        "high": float,
-                        "low": float,
-                        "close": float,
-                        "volume": int,
-                        "is_historical": true
-                    },
-                    ...
-                ],
-                "forecast_10_hours": [
-                    {
-                        "timestamp": ISO string,
-                        "forecast": float,
-                        "confidence": float,
-                        "is_forecast": true
-                    },
-                    ...
-                ],
-                "median_price": float,
-                "forecast_high": float,
-                "forecast_low": float,
-                "current_price": float,
-                "last_update": ISO string
-            }
-        """
-        try:
-            # Find sector if not provided
-            if sector is None:
-                sector = self._find_sector_for_ticker(ticker)
-                if sector is None:
-                    return {
-                        "ticker": ticker,
-                        "status": "error",
-                        "error": f"Ticker {ticker} not found in any sector configuration"
-                    }
-            
-            sector_lower = sector.lower()
-            
-            # Fetch historical hourly data (last 40 hours + some buffer)
-            try:
-                hist = yf.Ticker(ticker).history(period="7d", interval="1h")
-            except Exception as e:
-                return {
-                    "ticker": ticker,
-                    "sector": sector_lower,
-                    "status": "error",
-                    "error": f"Failed to fetch data: {str(e)}"
-                }
-            
-            if len(hist) < 40:
-                return {
-                    "ticker": ticker,
-                    "sector": sector_lower,
-                    "status": "error",
-                    "error": f"Insufficient historical data. Got {len(hist)} hours, need 40"
-                }
-            
-            # Take last 40 hours
-            hist_40 = hist.iloc[-40:].copy()
-            hist_40.index = pd.to_datetime(hist_40.index, utc=True)
-            
-            # Prepare features for model
-            try:
-                df_features, full_features = engineer_features(hist_40, hist_40['Close'])
-            except Exception as e:
-                logger.warning(f"Feature engineering error: {e}. Using simpler fallback.")
-                return self._fallback_forecast(ticker, sector_lower, hist_40)
-            
-            if full_features is None or len(full_features) < 40:
-                return self._fallback_forecast(ticker, sector_lower, hist_40)
-            
-            # Get scaler for this ticker
-            if sector_lower not in self.scalers:
-                logger.warning(f"No scaler found for sector {sector_lower}")
-                return self._fallback_forecast(ticker, sector_lower, hist_40)
-            
-            scalers = self.scalers[sector_lower]
-            if ticker not in scalers:
-                logger.warning(f"No scaler found for ticker {ticker}")
-                return self._fallback_forecast(ticker, sector_lower, hist_40)
-            
-            # Normalize features
-            X_input = full_features.values[-40:].reshape(1, 40, -1)
-            X_normalized = apply_robust_normalization(X_input, scalers[ticker])
-            X_tensor = torch.tensor(X_normalized, dtype=torch.float32).to(self.device)
-            
-            # Get model predictions
-            if f"{sector_lower}_lstm" not in self.models:
-                logger.warning(f"LSTM model not loaded for sector {sector_lower}")
-                return self._fallback_forecast(ticker, sector_lower, hist_40)
-            
-            model = self.models[f"{sector_lower}_lstm"]
-            
-            with torch.no_grad():
-                logits, _ = model(X_tensor)
-                probs = F.softmax(logits, dim=1)
-                confidence = float(torch.max(probs[0]).cpu().numpy())
-                pred_class = int(torch.argmax(logits, dim=1)[0].cpu().numpy())
-            
-            # Generate forecast points
-            current_price = float(hist_40['Close'].iloc[-1])
-            forecast_prices = self._generate_forecast_prices(
-                current_price, 
-                hist_40,
-                pred_class,
-                confidence,
-                horizon_hours=10
-            )
-            
-            # Build response
-            last_40_ohlc = []
-            for idx, row in hist_40.iterrows():
-                last_40_ohlc.append({
-                    "timestamp": idx.isoformat(),
-                    "open": float(row['Open']),
-                    "high": float(row['High']),
-                    "low": float(row['Low']),
-                    "close": float(row['Close']),
-                    "volume": int(row['Volume']) if 'Volume' in row else 0,
-                    "is_historical": True
-                })
-            
-            forecast_10h = []
-            for i, price in enumerate(forecast_prices, 1):
-                timestamp = hist_40.index[-1] + timedelta(hours=i)
-                forecast_10h.append({
-                    "timestamp": timestamp.isoformat(),
-                    "forecast": float(price),
-                    "confidence": float(confidence * (1.0 - i * 0.03)),  # Confidence decreases with horizon
-                    "is_forecast": True
-                })
-            
-            median_price = float(hist_40['Close'].median())
-            forecast_arr = np.array(forecast_prices)
-            
-            return {
-                "ticker": ticker,
-                "sector": sector_lower,
-                "status": "success",
-                "last_40_hours": last_40_ohlc,
-                "forecast_10_hours": forecast_10h,
-                "median_price": float(median_price),
-                "forecast_high": float(np.max(forecast_arr)),
-                "forecast_low": float(np.min(forecast_arr)),
-                "current_price": float(current_price),
-                "last_update": datetime.now(timezone.utc).isoformat()
-            }
-            
-        except Exception as e:
-            logger.error(f"Error in forecast_hourly: {e}", exc_info=True)
-            return {
-                "ticker": ticker,
-                "sector": sector or "unknown",
-                "status": "error",
-                "error": str(e)
-            }
-    
+
     def _find_sector_for_ticker(self, ticker: str) -> Optional[str]:
-        """Find which sector a ticker belongs to."""
-        for sector, config in SECTORS_CONFIG.items():
-            if ticker in config["tickers"]:
+        ticker_upper = ticker.upper()
+        for sector, cfg in SECTORS_CONFIG.items():
+            if ticker_upper in cfg["tickers"]:
                 return sector
         return None
-    
-    def _generate_forecast_prices(
+
+    def _compute_barriers(
+        self,
+        df: pd.DataFrame,
+        pred_primary: int,
+        horizon: int,
+        k: int,
+    ) -> Dict[str, float]:
+        p_t = float(df["Close"].values[-1])
+
+        vol_t = float(df["vol_20"].values[-1])
+        if not np.isfinite(vol_t) or vol_t <= 0:
+            vol_t = float(df["Close"].pct_change().dropna().std())
+        if not np.isfinite(vol_t) or vol_t <= 0:
+            vol_t = 0.01
+
+        drift_val = float(df["drift"].values[-1])
+        if not np.isfinite(drift_val):
+            drift_val = 0.0
+
+        step_sqrt = np.sqrt(horizon)
+        deviation = (drift_val - 0.5 * vol_t**2) * horizon
+        upper_barrier = p_t * np.exp(deviation + k * vol_t * step_sqrt)
+        lower_barrier = p_t * np.exp(deviation - k * vol_t * step_sqrt)
+
+        is_call = (pred_primary == 1) and (upper_barrier > (p_t * 1.01))
+        is_put = (pred_primary == 2) and (lower_barrier < (p_t * 0.99))
+
+        return {
+            "p_t": p_t,
+            "vol_t": float(vol_t),
+            "drift_val": float(drift_val),
+            "upper_barrier": float(upper_barrier),
+            "lower_barrier": float(lower_barrier),
+            "is_call": bool(is_call),
+            "is_put": bool(is_put),
+        }
+
+    def _run_primary_and_meta(
+        self,
+        model: LSTMMixedModel,
+        meta_model: Optional[Any],
+        x_input: np.ndarray,
+    ) -> Dict[str, Any]:
+        x_tensor = torch.tensor(x_input, dtype=torch.float32).to(self.device)
+
+        with torch.no_grad():
+            logits, _ = model(x_tensor)
+            probs = F.softmax(logits, dim=1)
+            pred_primary = int(torch.argmax(logits, dim=1)[0].item())
+            confidence = float(torch.max(probs[0]).item())
+
+            x_raw_feat = x_tensor[0, -10:, :].flatten()
+            x_meta_model = (
+                torch.cat((probs[0], x_raw_feat)).detach().cpu().numpy().reshape(1, -1)
+            )
+
+        if meta_model is None:
+            meta_pred = 0
+        else:
+            try:
+                meta_pred = int(meta_model.predict(x_meta_model)[0])
+            except Exception:
+                meta_pred = 0
+
+        return {
+            "pred_primary": pred_primary,
+            "meta_pred": meta_pred,
+            "confidence": confidence,
+            "probs": probs[0].detach().cpu().numpy().astype(float).tolist(),
+            "x_tensor": x_tensor,
+        }
+
+    def _pipeline_context(self, ticker: str, sector: Optional[str] = None) -> Dict[str, Any]:
+        ticker_upper = ticker.upper().strip()
+
+        if sector is None:
+            sector = self._find_sector_for_ticker(ticker_upper)
+            if sector is None:
+                return {
+                    "status": "error",
+                    "ticker": ticker_upper,
+                    "error": f"Ticker {ticker_upper} not found in configured sectors",
+                }
+
+        sector_lower = sector.lower()
+        if sector_lower not in SECTORS_CONFIG:
+            return {
+                "status": "error",
+                "ticker": ticker_upper,
+                "sector": sector_lower,
+                "error": f"Unknown sector: {sector_lower}",
+            }
+
+        assets_ready = (
+            sector_lower in self.daily_models
+            and sector_lower in self.hourly_models
+            and sector_lower in self.daily_scalers
+            and sector_lower in self.hourly_scalers
+        )
+        if not assets_ready:
+            return {
+                "status": "error",
+                "ticker": ticker_upper,
+                "sector": sector_lower,
+                "error": f"Missing model or scaler assets for sector {sector_lower}",
+            }
+
+        y_ticker = yf.Ticker(ticker_upper)
+        hist_daily = y_ticker.history(period="max")
+        hist_hourly = y_ticker.history(period="730d", interval="1h")
+
+        if hist_daily.empty or hist_hourly.empty:
+            return {
+                "status": "error",
+                "ticker": ticker_upper,
+                "sector": sector_lower,
+                "error": "Historical data unavailable",
+            }
+
+        hist_daily = self._to_market_timezone(hist_daily)
+        hist_hourly = self._to_market_timezone(hist_hourly)
+
+        df_daily, full_daily = engineer_features(hist_daily.copy(), hist_daily["Close"])
+        df_hourly, full_hourly = engineer_features(hist_hourly.copy(), hist_hourly["Close"])
+
+        if full_daily is None or full_hourly is None:
+            return {
+                "status": "error",
+                "ticker": ticker_upper,
+                "sector": sector_lower,
+                "error": "Feature engineering did not produce sufficient rows",
+            }
+
+        if len(full_daily) < (SEQ_LEN_DAILY + MIN_INFERENCE_BUFFER) or len(full_hourly) < (SEQ_LEN_HOURLY + MIN_INFERENCE_BUFFER):
+            return {
+                "status": "error",
+                "ticker": ticker_upper,
+                "sector": sector_lower,
+                "error": "Insufficient processed feature windows for inference (requires seq_len + 20)",
+            }
+
+        daily_scalers = self.daily_scalers[sector_lower]
+        hourly_scalers = self.hourly_scalers[sector_lower]
+
+        if ticker_upper not in daily_scalers or ticker_upper not in hourly_scalers:
+            return {
+                "status": "error",
+                "ticker": ticker_upper,
+                "sector": sector_lower,
+                "error": f"Ticker scaler not available for {ticker_upper}",
+            }
+
+        x_daily = full_daily.values[-SEQ_LEN_DAILY:].reshape(1, SEQ_LEN_DAILY, -1)
+        x_hourly = full_hourly.values[-SEQ_LEN_HOURLY:].reshape(1, SEQ_LEN_HOURLY, -1)
+
+        x_daily = apply_robust_normalization(x_daily, daily_scalers[ticker_upper])
+        x_hourly = apply_robust_normalization(x_hourly, hourly_scalers[ticker_upper])
+
+        daily_pred = self._run_primary_and_meta(
+            self.daily_models[sector_lower],
+            self.daily_meta_models.get(sector_lower),
+            x_daily,
+        )
+        hourly_pred = self._run_primary_and_meta(
+            self.hourly_models[sector_lower],
+            self.hourly_meta_models.get(sector_lower),
+            x_hourly,
+        )
+
+        # Notebook parity: skip ticker early when both primary models are neutral.
+        if daily_pred["pred_primary"] == 0 and hourly_pred["pred_primary"] == 0:
+            return {
+                "status": "no_signal",
+                "ticker": ticker_upper,
+                "sector": sector_lower,
+                "hist_hourly": hist_hourly,
+                "daily_pred": daily_pred,
+                "hourly_pred": hourly_pred,
+                "has_opportunity": False,
+                "no_signal_reason": "neutral_primary_skip",
+            }
+
+        daily_barriers = self._compute_barriers(df_daily, daily_pred["pred_primary"], TBM_HORIZON_DAILY, TBM_K)
+        hourly_barriers = self._compute_barriers(df_hourly, hourly_pred["pred_primary"], TBM_HORIZON_HOURLY, TBM_K)
+
+        is_call = daily_barriers["is_call"]
+        is_put = daily_barriers["is_put"]
+        is_call_hourly = hourly_barriers["is_call"]
+        is_put_hourly = hourly_barriers["is_put"]
+        has_hourly_signal = is_call_hourly or is_put_hourly
+        has_daily_signal = is_call or is_put
+        has_opportunity = has_hourly_signal or has_daily_signal
+
+        selected_direction = "neutral"
+        source = "none"
+        if has_hourly_signal:
+            source = "hourly"
+            if is_call_hourly and not is_put_hourly:
+                selected_direction = "call"
+            elif is_put_hourly and not is_call_hourly:
+                selected_direction = "put"
+            else:
+                # Conflict-safe ordering: keep hourly dominance, then use hourly primary as tie-break.
+                pred_hourly = int(hourly_pred.get("pred_primary", 0))
+                if pred_hourly == 1:
+                    selected_direction = "call"
+                elif pred_hourly == 2:
+                    selected_direction = "put"
+                else:
+                    selected_direction = "call"
+        elif has_daily_signal:
+            source = "daily"
+            if is_call and not is_put:
+                selected_direction = "call"
+            elif is_put and not is_call:
+                selected_direction = "put"
+            else:
+                pred_daily = int(daily_pred.get("pred_primary", 0))
+                if pred_daily == 1:
+                    selected_direction = "call"
+                elif pred_daily == 2:
+                    selected_direction = "put"
+
+        if selected_direction == "call":
+            op_type = "call"
+            target_type = 1
+            barrier = hourly_barriers["upper_barrier"] if source == "hourly" else daily_barriers["upper_barrier"]
+            barrier_hourly = hourly_barriers["upper_barrier"]
+            no_signal_reason = ""
+        elif selected_direction == "put":
+            op_type = "put"
+            target_type = 2
+            barrier = hourly_barriers["lower_barrier"] if source == "hourly" else daily_barriers["lower_barrier"]
+            barrier_hourly = hourly_barriers["lower_barrier"]
+            no_signal_reason = ""
+        else:
+            op_type = "neutral"
+            target_type = 0
+            barrier = daily_barriers["p_t"]
+            barrier_hourly = hourly_barriers["p_t"]
+            no_signal_reason = "barrier_criteria_not_met"
+
+        return {
+            "status": "success",
+            "ticker": ticker_upper,
+            "sector": sector_lower,
+            "y_ticker": y_ticker,
+            "hist_hourly": hist_hourly,
+            "daily_pred": daily_pred,
+            "hourly_pred": hourly_pred,
+            "daily_barriers": daily_barriers,
+            "hourly_barriers": hourly_barriers,
+            "op_type": op_type,
+            "target_type": target_type,
+            "barrier": float(barrier),
+            "barrier_hourly": float(barrier_hourly),
+            "has_opportunity": has_opportunity,
+            "no_signal_reason": no_signal_reason,
+        }
+
+    def _generate_deterministic_forecast_prices(
         self,
         current_price: float,
+        barrier_hourly: float,
+        confidence_hourly: float,
+        op_type: str,
         historical_data: pd.DataFrame,
-        pred_class: int,
-        confidence: float,
-        horizon_hours: int = 10
+        horizon_hours: int = 10,
     ) -> List[float]:
-        """
-        Generate forecast prices for next N hours.
-        
-        pred_class: 0=down, 1=neutral, 2=up
-        """
-        try:
-            # Calculate volatility and drift from historical data
-            returns = historical_data['Close'].pct_change().dropna()
-            volatility = float(returns.std())
-            drift = float(returns.mean())
-            
-            if np.isnan(volatility) or volatility == 0:
-                volatility = 0.01
-            if np.isnan(drift):
-                drift = 0.0
-        except:
-            volatility = 0.01
-            drift = 0.0
-        
-        forecast_prices = []
-        
-        for h in range(1, horizon_hours + 1):
-            # Bias forecast direction based on pred_class
-            if pred_class == 2:  # Up
-                direction_bias = confidence * 0.02 * h / horizon_hours
-            elif pred_class == 0:  # Down
-                direction_bias = -confidence * 0.02 * h / horizon_hours
-            else:  # Neutral
-                direction_bias = 0.0
-            
-            # Brownian motion with direction bias
-            random_shock = np.random.normal(0, volatility * np.sqrt(h / horizon_hours))
-            forecast_price = current_price * np.exp(
-                (drift + direction_bias) * (h / horizon_hours) + random_shock
+        returns = historical_data["Close"].pct_change().dropna()
+        trend = float(returns.tail(12).mean()) if not returns.empty else 0.0
+        confidence = float(np.clip(confidence_hourly, 0.2, 0.95))
+        curvature = float(1.0 + (1.0 - confidence) * 0.6)
+
+        forecast = []
+        for step in range(1, horizon_hours + 1):
+            alpha = step / float(horizon_hours)
+            weighted_alpha = alpha**curvature
+            base_target = current_price + (barrier_hourly - current_price) * weighted_alpha
+            trend_adj = current_price * trend * step * 0.35
+            mean_revert = (current_price - base_target) * (1.0 - confidence) * (1.0 - alpha) * 0.12
+
+            price = max(base_target + trend_adj + mean_revert, 0.01)
+            if op_type == "call":
+                price = max(price, current_price * 0.96)
+            elif op_type == "put":
+                price = min(price, current_price * 1.04)
+
+            forecast.append(float(price))
+
+        return forecast
+
+    def _format_last_40_ohlc(self, hist_hourly: pd.DataFrame) -> List[Dict[str, Any]]:
+        hist_40 = hist_hourly.iloc[-40:].copy()
+        rows = []
+        for idx, row in hist_40.iterrows():
+            rows.append(
+                {
+                    "timestamp": idx.isoformat(),
+                    "open": float(row["Open"]),
+                    "high": float(row["High"]),
+                    "low": float(row["Low"]),
+                    "close": float(row["Close"]),
+                    "volume": int(row["Volume"]) if "Volume" in row else 0,
+                    "is_historical": True,
+                }
             )
-            
-            forecast_prices.append(float(forecast_price))
-        
-        return forecast_prices
-    
+        return rows
+
+    def _build_forecast_payload(self, context: Dict[str, Any]) -> Dict[str, Any]:
+        hist_hourly = context["hist_hourly"]
+        hist_40 = hist_hourly.iloc[-40:].copy()
+
+        current_price = float(hist_40["Close"].iloc[-1])
+        confidence_hourly = float(context["hourly_pred"]["confidence"])
+
+        forecast_prices = self._generate_deterministic_forecast_prices(
+            current_price=current_price,
+            barrier_hourly=float(context["barrier_hourly"]),
+            confidence_hourly=confidence_hourly,
+            op_type=context["op_type"],
+            historical_data=hist_40,
+            horizon_hours=10,
+        )
+
+        forecast_rows = []
+        base_ts = hist_40.index[-1]
+        for i, price in enumerate(forecast_prices, 1):
+            step_conf = float(max(0.25, confidence_hourly * (1.0 - i * 0.03)))
+            forecast_rows.append(
+                {
+                    "timestamp": (base_ts + timedelta(hours=i)).isoformat(),
+                    "forecast": float(price),
+                    "confidence": step_conf,
+                    "is_forecast": True,
+                }
+            )
+
+        forecast_arr = np.array(forecast_prices)
+
+        return {
+            "ticker": context["ticker"],
+            "sector": context["sector"],
+            "status": "success" if context["has_opportunity"] else "success_no_signal",
+            "last_40_hours": self._format_last_40_ohlc(hist_hourly),
+            "forecast_10_hours": forecast_rows,
+            "median_price": float(hist_40["Close"].median()),
+            "forecast_high": float(np.max(forecast_arr)),
+            "forecast_low": float(np.min(forecast_arr)),
+            "current_price": current_price,
+            "op_type": context["op_type"],
+            "barrier": float(context["barrier"]),
+            "barrier_hourly": float(context["barrier_hourly"]),
+            "confidence_daily": float(context["daily_pred"]["confidence"]),
+            "confidence_hourly": confidence_hourly,
+            "metadata": {
+                "has_opportunity": bool(context["has_opportunity"]),
+                "target_type": int(context["target_type"]),
+                "pred_primary_daily": int(context["daily_pred"]["pred_primary"]),
+                "pred_primary_hourly": int(context["hourly_pred"]["pred_primary"]),
+                "meta_pred_daily": int(context["daily_pred"]["meta_pred"]),
+                "meta_pred_hourly": int(context["hourly_pred"]["meta_pred"]),
+                "daily_probs": context["daily_pred"]["probs"],
+                "hourly_probs": context["hourly_pred"]["probs"],
+                "daily_barriers": {
+                    "upper": float(context["daily_barriers"]["upper_barrier"]),
+                    "lower": float(context["daily_barriers"]["lower_barrier"]),
+                },
+                "hourly_barriers": {
+                    "upper": float(context["hourly_barriers"]["upper_barrier"]),
+                    "lower": float(context["hourly_barriers"]["lower_barrier"]),
+                },
+            },
+            "last_update": self._now_market_iso(),
+        }
+
+    def _build_no_signal_forecast_payload(self, context: Dict[str, Any]) -> Dict[str, Any]:
+        hist_hourly = context["hist_hourly"]
+        hist_40 = hist_hourly.iloc[-40:].copy()
+        current_price = float(hist_40["Close"].iloc[-1])
+        confidence_hourly = float(context["hourly_pred"]["confidence"])
+
+        forecast_prices = self._generate_deterministic_forecast_prices(
+            current_price=current_price,
+            barrier_hourly=current_price,
+            confidence_hourly=confidence_hourly,
+            op_type="neutral",
+            historical_data=hist_40,
+            horizon_hours=10,
+        )
+
+        forecast_rows = []
+        base_ts = hist_40.index[-1]
+        for i, price in enumerate(forecast_prices, 1):
+            step_conf = float(max(0.25, confidence_hourly * (1.0 - i * 0.03)))
+            forecast_rows.append(
+                {
+                    "timestamp": (base_ts + timedelta(hours=i)).isoformat(),
+                    "forecast": float(price),
+                    "confidence": step_conf,
+                    "is_forecast": True,
+                }
+            )
+
+        forecast_arr = np.array(forecast_prices)
+
+        return {
+            "ticker": context["ticker"],
+            "sector": context["sector"],
+            "status": "success_no_signal",
+            "last_40_hours": self._format_last_40_ohlc(hist_hourly),
+            "forecast_10_hours": forecast_rows,
+            "median_price": float(hist_40["Close"].median()),
+            "forecast_high": float(np.max(forecast_arr)),
+            "forecast_low": float(np.min(forecast_arr)),
+            "current_price": current_price,
+            "op_type": "neutral",
+            "barrier": current_price,
+            "barrier_hourly": current_price,
+            "confidence_daily": float(context["daily_pred"]["confidence"]),
+            "confidence_hourly": confidence_hourly,
+            "metadata": {
+                "has_opportunity": False,
+                "target_type": 0,
+                "pred_primary_daily": int(context["daily_pred"]["pred_primary"]),
+                "pred_primary_hourly": int(context["hourly_pred"]["pred_primary"]),
+                "meta_pred_daily": int(context["daily_pred"]["meta_pred"]),
+                "meta_pred_hourly": int(context["hourly_pred"]["meta_pred"]),
+                "daily_probs": context["daily_pred"]["probs"],
+                "hourly_probs": context["hourly_pred"]["probs"],
+                "no_signal_reason": context.get("no_signal_reason", "neutral_primary_skip"),
+            },
+            "last_update": self._now_market_iso(),
+        }
+
+    def _sanitize_success_forecast_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        status = str(payload.get("status", ""))
+        if not status.startswith("success"):
+            return payload
+
+        error_detail = payload.pop("error", None)
+        if error_detail is None:
+            return payload
+
+        fallback_reason = str(error_detail)
+        payload.setdefault("fallback_reason", fallback_reason)
+
+        metadata = payload.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+            payload["metadata"] = metadata
+        metadata.setdefault("fallback_reason", fallback_reason)
+
+        return payload
+
+    def _is_unsupported_context_error(self, context: Dict[str, Any]) -> bool:
+        if context.get("status") != "error":
+            return False
+
+        error_text = str(context.get("error", "")).lower()
+        return (
+            "not found in configured sectors" in error_text
+            or "unknown sector:" in error_text
+        )
+
     def _fallback_forecast(
         self,
         ticker: str,
         sector: str,
-        hist_data: pd.DataFrame
-    ) -> Dict:
-        """Generate simple fallback forecast when model inference fails."""
-        current_price = float(hist_data['Close'].iloc[-1])
-        median_price = float(hist_data['Close'].median())
-        volatility = float(hist_data['Close'].pct_change().std())
-        
-        # Simple extrapolation
-        forecast_prices = []
-        for h in range(1, 11):
-            noise = np.random.normal(0, volatility * 0.5)
-            price = current_price * (1 + noise * h / 10)
-            forecast_prices.append(float(max(0.01, price)))
-        
-        last_40_ohlc = []
-        for idx, row in hist_data.iterrows():
-            last_40_ohlc.append({
-                "timestamp": idx.isoformat(),
-                "open": float(row['Open']),
-                "high": float(row['High']),
-                "low": float(row['Low']),
-                "close": float(row['Close']),
-                "volume": int(row['Volume']) if 'Volume' in row else 0,
-                "is_historical": True
-            })
-        
-        forecast_10h = []
-        last_time = hist_data.index[-1]
+        hist_data: pd.DataFrame,
+        error: str,
+    ) -> Dict[str, Any]:
+        hist_40 = hist_data.iloc[-40:].copy() if len(hist_data) >= 40 else hist_data.copy()
+        current_price = float(hist_40["Close"].iloc[-1])
+        returns = hist_40["Close"].pct_change().dropna()
+        drift = float(returns.mean()) if not returns.empty else 0.0
+
+        forecast_prices = [max(current_price * float(np.exp(drift * h)), 0.01) for h in range(1, 11)]
+
+        forecast_rows = []
+        last_time = hist_40.index[-1]
         for i, price in enumerate(forecast_prices, 1):
-            timestamp = last_time + timedelta(hours=i)
-            forecast_10h.append({
-                "timestamp": timestamp.isoformat(),
-                "forecast": float(price),
-                "confidence": 0.5,
-                "is_forecast": True
-            })
-        
+            forecast_rows.append(
+                {
+                    "timestamp": (last_time + timedelta(hours=i)).isoformat(),
+                    "forecast": float(price),
+                    "confidence": 0.4,
+                    "is_forecast": True,
+                }
+            )
+
         return {
             "ticker": ticker,
             "sector": sector,
             "status": "success_fallback",
-            "last_40_hours": last_40_ohlc,
-            "forecast_10_hours": forecast_10h,
-            "median_price": float(median_price),
+            "fallback_reason": error,
+            "last_40_hours": self._format_last_40_ohlc(hist_40),
+            "forecast_10_hours": forecast_rows,
+            "median_price": float(hist_40["Close"].median()),
             "forecast_high": float(np.max(forecast_prices)),
             "forecast_low": float(np.min(forecast_prices)),
-            "current_price": float(current_price),
-            "last_update": datetime.now(timezone.utc).isoformat()
+            "current_price": current_price,
+            "op_type": "neutral",
+            "barrier": current_price,
+            "barrier_hourly": current_price,
+            "confidence_daily": 0.4,
+            "confidence_hourly": 0.4,
+            "metadata": {
+                "has_opportunity": False,
+                "target_type": 0,
+                "fallback_reason": error,
+            },
+            "last_update": self._now_market_iso(),
         }
+
+    def forecast_hourly(self, ticker: str, sector: str = None) -> Dict[str, Any]:
+        try:
+            context = self._pipeline_context(ticker=ticker, sector=sector)
+            if context.get("status") == "error":
+                if self._is_unsupported_context_error(context):
+                    return context
+
+                ticker_upper = ticker.upper().strip()
+                sector_resolved = sector or self._find_sector_for_ticker(ticker_upper) or "unknown"
+                try:
+                    hist_hourly = yf.Ticker(ticker_upper).history(period="7d", interval="1h")
+                    if hist_hourly.empty:
+                        return context
+                    hist_hourly = self._to_market_timezone(hist_hourly)
+                    return self._sanitize_success_forecast_payload(
+                        self._fallback_forecast(
+                            ticker=ticker_upper,
+                            sector=sector_resolved,
+                            hist_data=hist_hourly,
+                            error=context.get("error", "pipeline_error"),
+                        )
+                    )
+                except Exception:
+                    return context
+
+            if context.get("status") == "no_signal":
+                return self._sanitize_success_forecast_payload(
+                    self._build_no_signal_forecast_payload(context)
+                )
+
+            return self._sanitize_success_forecast_payload(self._build_forecast_payload(context))
+        except Exception as exc:
+            logger.error("Error in forecast_hourly: %s", exc, exc_info=True)
+            return {
+                "ticker": ticker,
+                "sector": sector or "unknown",
+                "status": "error",
+                "error": str(exc),
+            }
+
+    def build_options_analysis(
+        self,
+        ticker: str,
+        sentiment_probs: Optional[np.ndarray] = None,
+        sentiment_score: float = 0.0,
+        sector: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        try:
+            context = self._pipeline_context(ticker=ticker, sector=sector)
+            if context.get("status") == "no_signal":
+                hist_hourly = context.get("hist_hourly")
+                current_price = (
+                    float(hist_hourly["Close"].iloc[-1])
+                    if isinstance(hist_hourly, pd.DataFrame) and not hist_hourly.empty
+                    else 0.0
+                )
+                return {
+                    "ticker": context.get("ticker", ticker.upper().strip()),
+                    "sector": context.get("sector", sector),
+                    "status": "success_no_signal",
+                    "op_type": "neutral",
+                    "target_type": 0,
+                    "current_price": current_price,
+                    "barrier": current_price,
+                    "barrier_hourly": current_price,
+                    "confidence_daily": float(context.get("daily_pred", {}).get("confidence", 0.0)),
+                    "confidence_hourly": float(context.get("hourly_pred", {}).get("confidence", 0.0)),
+                    "table_rows": [],
+                    "suggested_options": [],
+                    "sentiment_score": float(sentiment_score),
+                    "no_signal_reason": context.get("no_signal_reason", "neutral_primary_skip"),
+                    "timestamp": self._now_market_iso(),
+                }
+
+            if context.get("status") == "error":
+                return {
+                    "ticker": ticker.upper().strip(),
+                    "sector": sector,
+                    "status": "error",
+                    "error": context.get("error", "inference_error"),
+                    "table_rows": [],
+                    "suggested_options": [],
+                }
+
+            ticker_upper = context["ticker"]
+            sector_lower = context["sector"]
+            has_opportunity = bool(context["has_opportunity"])
+
+            if sentiment_probs is None:
+                sentiment_probs = np.array([])
+
+            table_rows: List[Dict[str, Any]] = []
+            suggested_options: List[Dict[str, Any]] = []
+
+            if has_opportunity and context["op_type"] in {"call", "put"}:
+                barrier_df = get_barrier_probabilities(
+                    context["y_ticker"],
+                    context["barrier"],
+                    context["op_type"],
+                )
+
+                if not barrier_df.empty:
+                    b_params = SECTORS_CONFIG[sector_lower]["bayesian"]
+                    b_params_hourly = SECTORS_CONFIG[sector_lower]["bayesian_hourly"]
+
+                    precision_base = b_params["p_call"] if context["target_type"] == 1 else b_params["p_put"]
+                    precision_base_hourly = b_params_hourly["p_call"] if context["target_type"] == 1 else b_params_hourly["p_put"]
+
+                    for _, row in barrier_df.iterrows():
+                        p_final, score = calculate_bayesian_final_probability(
+                            target_type=context["target_type"],
+                            pred_primary=context["daily_pred"]["pred_primary"],
+                            meta_pred=context["daily_pred"]["meta_pred"],
+                            precision_base=precision_base,
+                            recall_meta=b_params["sensitivity"],
+                            spec_meta=b_params["specificity"],
+                            pred_primary_hourly=context["hourly_pred"]["pred_primary"],
+                            meta_pred_hourly=context["hourly_pred"]["meta_pred"],
+                            precision_base_hourly=precision_base_hourly,
+                            recall_meta_hourly=b_params_hourly["sensitivity"],
+                            spec_meta_hourly=b_params_hourly["specificity"],
+                            probs_news=sentiment_probs,
+                            p_market=float(row["Prob. Toca Strike"]),
+                            w_market=0.3,
+                        )
+
+                        row_dict = {
+                            "Fecha": datetime.now().strftime("%Y-%m-%d"),
+                            "Sector": sector_lower,
+                            "Ticker": ticker_upper,
+                            "Tipo": context["op_type"].upper(),
+                            "Precio Actual": round(float(context["daily_barriers"]["p_t"]), 2),
+                            "Barrera": round(float(context["barrier"]), 2),
+                            "Barrera a 10 hrs": round(float(context["barrier_hourly"]), 2),
+                            "Vencimiento": str(row["Vencimiento"]),
+                            "Strike": float(row["Strike Seleccionado"]),
+                            "Ask": float(row["Ask"]),
+                            "IV": float(row["IV"]),
+                            "Prob. Mercado": float(row["Prob. Toca Strike"]),
+                            "Prob. Final (Bayes)": round(float(p_final), 4),
+                            "Sentimiento Score": round(float(score if np.isfinite(score) else sentiment_score), 4),
+                        }
+                        table_rows.append(row_dict)
+
+                        suggested_options.append(
+                            {
+                                "option_type": context["op_type"],
+                                "strike": row_dict["Strike"],
+                                "expiration": row_dict["Vencimiento"],
+                                "ask": row_dict["Ask"],
+                                "iv": row_dict["IV"],
+                                "market_probability": row_dict["Prob. Mercado"],
+                                "probability": row_dict["Prob. Final (Bayes)"],
+                                "recommendation": "Buy" if row_dict["Prob. Final (Bayes)"] >= 0.6 else "Consider",
+                            }
+                        )
+
+            table_rows.sort(key=lambda item: item.get("Prob. Final (Bayes)", 0), reverse=True)
+            suggested_options.sort(key=lambda item: item.get("probability", 0), reverse=True)
+
+            status = "success" if table_rows else ("success_no_signal" if not has_opportunity else "success_no_options")
+
+            payload = {
+                "ticker": ticker_upper,
+                "sector": sector_lower,
+                "status": status,
+                "op_type": context["op_type"],
+                "target_type": int(context["target_type"]),
+                "current_price": float(context["daily_barriers"]["p_t"]),
+                "barrier": float(context["barrier"]),
+                "barrier_hourly": float(context["barrier_hourly"]),
+                "confidence_daily": float(context["daily_pred"]["confidence"]),
+                "confidence_hourly": float(context["hourly_pred"]["confidence"]),
+                "table_rows": table_rows,
+                "suggested_options": suggested_options,
+                "sentiment_score": float(sentiment_score),
+                "timestamp": self._now_market_iso(),
+            }
+
+            if status == "success_no_signal":
+                payload["no_signal_reason"] = context.get("no_signal_reason", "barrier_criteria_not_met")
+
+            return payload
+        except Exception as exc:
+            logger.error("Error building options analysis for %s: %s", ticker, exc, exc_info=True)
+            return {
+                "ticker": ticker.upper().strip(),
+                "status": "error",
+                "error": str(exc),
+                "table_rows": [],
+                "suggested_options": [],
+                "timestamp": self._now_market_iso(),
+            }
 
 
 def create_inference_service(model_dir: str = "models") -> InferenceService:

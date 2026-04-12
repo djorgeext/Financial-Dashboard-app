@@ -156,6 +156,29 @@ class TestForecastEndpoints:
         assert "forecast_10_hours" in data
         assert "last_40_hours" in data
         mock_inference.forecast_hourly.assert_called_once_with("BAC")
+
+    def test_hourly_ticker_success_payload_strips_top_level_error(self, client, monkeypatch):
+        """Contract test: success_* forecast payloads must not expose top-level error."""
+        mock_inference = Mock()
+        mock_inference.forecast_hourly.return_value = {
+            "ticker": "BAC",
+            "sector": "banks",
+            "status": "success_fallback",
+            "error": "feature_windows_insufficient",
+            "forecast_10_hours": [{"timestamp": "2026-04-12T01:00:00", "forecast": 40.5}],
+            "last_40_hours": [{"timestamp": "2026-04-12T00:00:00", "close": 40.0}],
+        }
+
+        monkeypatch.setattr(app_module, "inference_service", mock_inference)
+
+        response = client.get("/api/forecast/hourly/BAC")
+        assert response.status_code == 200
+
+        data = response.json()
+        assert data["status"] == "success_fallback"
+        assert "error" not in data
+        assert data["fallback_reason"] == "feature_windows_insufficient"
+        assert data["metadata"]["fallback_reason"] == "feature_windows_insufficient"
     
     def test_forecast_invalid_granularity(self, client):
         """Test forecast with invalid granularity."""
@@ -209,7 +232,7 @@ class TestNewsEndpoints:
         assert "application/json" in response.headers.get("content-type", "")
 
     def test_ticker_news_endpoint_structure_and_status_with_explicit_context(self, client, monkeypatch):
-        """Ensure ticker endpoint returns JSON structure and forwards explicit news_items context."""
+        """Ensure ticker endpoint returns JSON structure and calls notebook-style ticker analysis."""
         mock_inference = Mock()
         mock_inference.get_sector_ticker_mapping.return_value = {
             "sectors": {
@@ -218,11 +241,15 @@ class TestNewsEndpoints:
         }
 
         mock_news = Mock()
-        mock_news.analyze_news.return_value = {
+        mock_news.analyze_ticker_news.return_value = {
+            "ticker": "AAPL",
+            "sector": "tech",
             "sentiment": "bullish",
             "sentiment_score": 0.7,
-            "signals": ["Positive guidance"],
+            "key_signals": ["Positive guidance"],
             "summary": "Constructive momentum",
+            "news_summaries": [{"title": "Headline"}],
+            "metrics": {"retained": 2},
             "timestamp": "2026-04-12T00:00:00",
             "status": "success"
         }
@@ -240,13 +267,13 @@ class TestNewsEndpoints:
         assert data["status"] == "success"
         assert "sentiment" in data
         assert "key_signals" in data
+        assert "news_summaries" in data
+        assert "metrics" in data
 
-        mock_news.analyze_news.assert_called_once()
-        args, _ = mock_news.analyze_news.call_args
-        assert args[0] == "tech"
-        assert isinstance(args[1], list)
-        assert len(args[1]) > 0
-        assert any("AAPL" in item for item in args[1])
+        mock_news.analyze_ticker_news.assert_called_once()
+        kwargs = mock_news.analyze_ticker_news.call_args.kwargs
+        assert kwargs["ticker"] == "AAPL"
+        assert kwargs["sector"] == "tech"
 
     def test_news_ticker_literal_still_routes_to_sector_endpoint(self, client):
         """Ensure /api/news/ticker still maps to sector endpoint semantics."""
@@ -257,6 +284,340 @@ class TestNewsEndpoints:
         assert data["status_code"] == 400
         assert "error" in data
         assert "timestamp" in data
+
+
+class TestOptionsEndpoints:
+    """Tests for options endpoint payload structure."""
+
+    def test_options_endpoint_notebook_columns_present(self, client, monkeypatch):
+        mock_inference = Mock()
+        mock_inference.get_sector_ticker_mapping.return_value = {
+            "sectors": {
+                "banks": {"tickers": ["BAC"]}
+            }
+        }
+        mock_inference.build_options_analysis.return_value = {
+            "ticker": "BAC",
+            "sector": "banks",
+            "status": "success",
+            "table_rows": [
+                {
+                    "Fecha": "2026-04-12",
+                    "Sector": "banks",
+                    "Ticker": "BAC",
+                    "Tipo": "CALL",
+                    "Precio Actual": 40.12,
+                    "Barrera": 41.02,
+                    "Barrera a 10 hrs": 40.86,
+                    "Vencimiento": "2026-04-24",
+                    "Strike": 40.5,
+                    "Ask": 0.65,
+                    "IV": 0.31,
+                    "Prob. Mercado": 0.52,
+                    "Prob. Final (Bayes)": 0.61,
+                    "Sentimiento Score": 0.12,
+                }
+            ],
+            "suggested_options": [
+                {
+                    "option_type": "call",
+                    "strike": 40.5,
+                    "expiration": "2026-04-24",
+                    "probability": 0.61,
+                }
+            ],
+        }
+
+        mock_news = Mock()
+        mock_news.analyze_ticker_news.return_value = {
+            "sentiment": "neutral",
+            "sentiment_score": 0.1,
+            "summary": "Balanced headlines",
+            "status": "success",
+        }
+
+        monkeypatch.setattr(app_module, "inference_service", mock_inference)
+        monkeypatch.setattr(app_module, "news_service", mock_news)
+
+        response = client.get("/api/options/BAC")
+        assert response.status_code == 200
+
+        data = response.json()
+        assert "table_rows" in data
+        assert len(data["table_rows"]) == 1
+        row = data["table_rows"][0]
+        assert "Prob. Final (Bayes)" in row
+        assert "Barrera a 10 hrs" in row
+        assert "Sentimiento Score" in row
+        assert "news" in data
+
+    def test_options_endpoint_no_signal_does_not_force_fallback(self, client, monkeypatch):
+        mock_inference = Mock()
+        mock_inference.get_sector_ticker_mapping.return_value = {
+            "sectors": {
+                "banks": {"tickers": ["BAC"]}
+            }
+        }
+        mock_inference.build_options_analysis.return_value = {
+            "ticker": "BAC",
+            "sector": "banks",
+            "status": "success_no_signal",
+            "op_type": "neutral",
+            "target_type": 0,
+            "current_price": 40.0,
+            "barrier": 40.0,
+            "barrier_hourly": 40.0,
+            "table_rows": [],
+            "suggested_options": [],
+            "no_signal_reason": "neutral_primary_skip",
+        }
+
+        mock_news = Mock()
+        mock_news.analyze_ticker_news.return_value = {
+            "sentiment": "neutral",
+            "sentiment_score": 0.0,
+            "summary": "No strong catalyst",
+            "status": "success",
+        }
+
+        mock_options_analyzer = Mock()
+        mock_options_analyzer.suggest_options.return_value = {
+            "suggested_options": [
+                {
+                    "option_type": "call",
+                    "strike": 41.0,
+                    "expiration": "2026-04-24",
+                    "probability": 0.5,
+                }
+            ]
+        }
+
+        monkeypatch.setattr(app_module, "inference_service", mock_inference)
+        monkeypatch.setattr(app_module, "news_service", mock_news)
+        monkeypatch.setattr(app_module, "options_analyzer", mock_options_analyzer)
+
+        response = client.get("/api/options/BAC")
+        assert response.status_code == 200
+
+        data = response.json()
+        assert data["status"] == "success_no_signal"
+        assert data["table_rows"] == []
+        assert data["suggested_options"] == []
+        assert data["op_type"] == "neutral"
+        mock_options_analyzer.suggest_options.assert_not_called()
+
+    def test_options_endpoint_unsupported_error_skips_fallback_analyzer(self, client, monkeypatch):
+        mock_inference = Mock()
+        mock_inference.get_sector_ticker_mapping.return_value = {
+            "sectors": {
+                "banks": {"tickers": ["BAC"]}
+            }
+        }
+        mock_inference.build_options_analysis.return_value = {
+            "ticker": "ZZZZ",
+            "sector": None,
+            "status": "error",
+            "error": "Ticker ZZZZ not found in configured sectors",
+            "table_rows": [],
+            "suggested_options": [],
+        }
+
+        mock_news = Mock()
+        mock_news.analyze_ticker_news.return_value = {
+            "sentiment": "neutral",
+            "sentiment_score": 0.0,
+            "summary": "No coverage",
+            "status": "success",
+        }
+
+        mock_options_analyzer = Mock()
+        mock_options_analyzer.suggest_options.return_value = {
+            "suggested_options": [
+                {
+                    "option_type": "call",
+                    "strike": 10.0,
+                    "expiration": "2026-04-24",
+                    "probability": 0.5,
+                }
+            ]
+        }
+
+        monkeypatch.setattr(app_module, "inference_service", mock_inference)
+        monkeypatch.setattr(app_module, "news_service", mock_news)
+        monkeypatch.setattr(app_module, "options_analyzer", mock_options_analyzer)
+
+        response = client.get("/api/options/ZZZZ")
+        assert response.status_code == 200
+
+        data = response.json()
+        assert data["status"] == "error"
+        assert data["error"] == "Ticker ZZZZ not found in configured sectors"
+        assert "fallback_detail" not in data
+        assert "fallback_reason" not in data
+        mock_inference.forecast_hourly.assert_not_called()
+        mock_options_analyzer.suggest_options.assert_not_called()
+
+    def test_options_endpoint_error_uses_frontend_compatible_fallback_payload(self, client, monkeypatch):
+        mock_inference = Mock()
+        mock_inference.get_sector_ticker_mapping.return_value = {
+            "sectors": {
+                "banks": {"tickers": ["BAC"]}
+            }
+        }
+        mock_inference.build_options_analysis.return_value = {
+            "ticker": "BAC",
+            "sector": "banks",
+            "status": "error",
+            "error": "inference_failed_for_ticker",
+            "table_rows": [],
+            "suggested_options": [],
+        }
+        mock_inference.forecast_hourly.return_value = {
+            "current_price": 40.0,
+            "forecast_10_hours": [
+                {"forecast": 40.8, "confidence": 0.71},
+                {"forecast": 41.0, "confidence": 0.74},
+            ],
+        }
+
+        mock_news = Mock()
+        mock_news.analyze_ticker_news.return_value = {
+            "sentiment": "neutral",
+            "sentiment_score": 0.0,
+            "summary": "Fallback news context",
+            "status": "success",
+        }
+
+        mock_options_analyzer = Mock()
+        mock_options_analyzer.suggest_options.return_value = {
+            "suggested_options": [
+                {
+                    "option_type": "call",
+                    "strike": 41.0,
+                    "expiration": "2026-04-24",
+                    "probability": 0.63,
+                }
+            ]
+        }
+
+        monkeypatch.setattr(app_module, "inference_service", mock_inference)
+        monkeypatch.setattr(app_module, "news_service", mock_news)
+        monkeypatch.setattr(app_module, "options_analyzer", mock_options_analyzer)
+
+        response = client.get("/api/options/BAC")
+        assert response.status_code == 200
+
+        data = response.json()
+        assert data["status"] == "success_fallback"
+        assert "error" not in data
+        assert data["table_rows"] == []
+        assert isinstance(data["suggested_options"], list)
+        assert len(data["suggested_options"]) > 0
+        assert data["fallback_reason"] == "inference_failed_for_ticker"
+
+        mock_inference.forecast_hourly.assert_called_once()
+        mock_options_analyzer.suggest_options.assert_called_once()
+
+    def test_options_endpoint_fallback_failure_returns_error_state(self, client, monkeypatch):
+        mock_inference = Mock()
+        mock_inference.get_sector_ticker_mapping.return_value = {
+            "sectors": {
+                "banks": {"tickers": ["BAC"]}
+            }
+        }
+        mock_inference.build_options_analysis.return_value = {
+            "ticker": "BAC",
+            "sector": "banks",
+            "status": "error",
+            "error": "inference_failed_for_ticker",
+            "table_rows": [],
+            "suggested_options": [],
+        }
+        mock_inference.forecast_hourly.return_value = {
+            "current_price": 40.0,
+            "forecast_10_hours": [
+                {"forecast": 40.8, "confidence": 0.71},
+            ],
+        }
+
+        mock_news = Mock()
+        mock_news.analyze_ticker_news.return_value = {
+            "sentiment": "neutral",
+            "sentiment_score": 0.0,
+            "summary": "Fallback news context",
+            "status": "success",
+        }
+
+        mock_options_analyzer = Mock()
+        mock_options_analyzer.suggest_options.return_value = {
+            "suggested_options": [],
+            "error": "pricing_engine_unavailable",
+        }
+
+        monkeypatch.setattr(app_module, "inference_service", mock_inference)
+        monkeypatch.setattr(app_module, "news_service", mock_news)
+        monkeypatch.setattr(app_module, "options_analyzer", mock_options_analyzer)
+
+        response = client.get("/api/options/BAC")
+        assert response.status_code == 200
+
+        data = response.json()
+        assert data["status"] == "error"
+        assert data["status"] != "success_fallback"
+        assert data["error"] == "fallback_failed"
+        assert data["fallback_reason"] == "inference_failed_for_ticker"
+        assert data["fallback_detail"] == "pricing_engine_unavailable"
+        assert data["suggested_options"] == []
+
+    def test_options_endpoint_fallback_empty_suggestions_returns_error_state(self, client, monkeypatch):
+        mock_inference = Mock()
+        mock_inference.get_sector_ticker_mapping.return_value = {
+            "sectors": {
+                "banks": {"tickers": ["BAC"]}
+            }
+        }
+        mock_inference.build_options_analysis.return_value = {
+            "ticker": "BAC",
+            "sector": "banks",
+            "status": "error",
+            "error": "inference_failed_for_ticker",
+            "table_rows": [],
+            "suggested_options": [],
+        }
+        mock_inference.forecast_hourly.return_value = {
+            "current_price": 40.0,
+            "forecast_10_hours": [
+                {"forecast": 40.2, "confidence": 0.65},
+            ],
+        }
+
+        mock_news = Mock()
+        mock_news.analyze_ticker_news.return_value = {
+            "sentiment": "neutral",
+            "sentiment_score": 0.0,
+            "summary": "Fallback news context",
+            "status": "success",
+        }
+
+        mock_options_analyzer = Mock()
+        mock_options_analyzer.suggest_options.return_value = {
+            "suggested_options": [],
+        }
+
+        monkeypatch.setattr(app_module, "inference_service", mock_inference)
+        monkeypatch.setattr(app_module, "news_service", mock_news)
+        monkeypatch.setattr(app_module, "options_analyzer", mock_options_analyzer)
+
+        response = client.get("/api/options/BAC")
+        assert response.status_code == 200
+
+        data = response.json()
+        assert data["status"] == "error"
+        assert data["status"] != "success_fallback"
+        assert data["error"] == "fallback_failed"
+        assert data["fallback_reason"] == "inference_failed_for_ticker"
+        assert data["fallback_detail"] == "empty_suggestions"
+        assert data["suggested_options"] == []
 
 
 class TestAggregatedDashboardEndpoint:

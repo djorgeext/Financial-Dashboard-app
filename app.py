@@ -38,6 +38,25 @@ inference_service: InferenceService = None
 options_analyzer: OptionsAnalyzer = None
 
 
+def _score_to_news_probs(score: float) -> np.ndarray:
+    """Convert scalar sentiment score [-1, 1] to pseudo class probabilities [neg, neu, pos]."""
+    clipped = float(np.clip(score, -1.0, 1.0))
+    pos = max(0.0, clipped)
+    neg = max(0.0, -clipped)
+    neu = max(0.0, 1.0 - abs(clipped))
+    probs = np.array([neg, neu, pos], dtype=float)
+    probs = probs / probs.sum() if probs.sum() > 0 else np.array([0.0, 1.0, 0.0], dtype=float)
+    return probs.reshape(1, -1)
+
+
+def _is_unsupported_ticker_or_sector_error(error_detail: Optional[str]) -> bool:
+    message = str(error_detail or "").lower()
+    return (
+        "not found in configured sectors" in message
+        or "unknown sector:" in message
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
@@ -270,6 +289,16 @@ async def get_hourly_forecast(ticker: str) -> Dict:
                 status_code=400,
                 detail=forecast.get("error", "Forecast generation failed")
             )
+
+        status = str(forecast.get("status", ""))
+        if status.startswith("success") and "error" in forecast:
+            fallback_reason = str(forecast.pop("error"))
+            forecast.setdefault("fallback_reason", fallback_reason)
+            metadata = forecast.get("metadata")
+            if not isinstance(metadata, dict):
+                metadata = {}
+                forecast["metadata"] = metadata
+            metadata.setdefault("fallback_reason", fallback_reason)
         
         logger.info(f"Successfully generated forecast for {ticker_upper}")
         return forecast
@@ -398,22 +427,67 @@ async def get_news(sector: str) -> Dict:
         )
     
     try:
-        # Mock news items for demo (in production, would fetch from news API)
-        news_items = [
-            f"{sector_lower.capitalize()} sector shows strong growth",
-            f"New regulations impact {sector_lower} companies",
-            f"Investment surge in {sector_lower} industry",
-            f"Analyst upgrade for {sector_lower.capitalize()} stocks",
-            f"Earnings beat from major {sector_lower.capitalize()} player"
-        ]
-        
-        # Analyze with Groq
-        analysis = news_service.analyze_news(sector_lower, news_items)
-        
+        tickers = config.SECTORS[sector_lower].get("tickers", [])[:3]
+        ticker_results = []
+        for ticker_symbol in tickers:
+            ticker_results.append(
+                news_service.analyze_ticker_news(
+                    ticker=ticker_symbol,
+                    sector=sector_lower,
+                    bank_name=ticker_symbol,
+                    max_items=4,
+                )
+            )
+
+        if ticker_results:
+            scores = [float(item.get("sentiment_score", 0.0)) for item in ticker_results]
+            avg_score = float(np.mean(scores)) if scores else 0.0
+            if avg_score > 0.15:
+                sector_sentiment = "bullish"
+            elif avg_score < -0.15:
+                sector_sentiment = "bearish"
+            else:
+                sector_sentiment = "neutral"
+
+            merged_signals = []
+            for item in ticker_results:
+                for sig in item.get("key_signals", []):
+                    if sig not in merged_signals:
+                        merged_signals.append(sig)
+
+            analysis = {
+                "sentiment": sector_sentiment,
+                "sentiment_score": avg_score,
+                "signals": merged_signals[:8],
+                "summary": " ".join(
+                    [
+                        str(item.get("bank_summary_en", "")).strip()
+                        for item in ticker_results
+                        if item.get("bank_summary_en")
+                    ][:2]
+                )
+                or "No summarizable news.",
+                "ticker_summaries": [
+                    {
+                        "ticker": item.get("ticker"),
+                        "sentiment": item.get("sentiment", "neutral"),
+                        "sentiment_score": item.get("sentiment_score", 0.0),
+                        "status": item.get("status", "unknown"),
+                    }
+                    for item in ticker_results
+                ],
+                "timestamp": datetime.now().isoformat(),
+                "status": "success",
+            }
+            news_count = int(sum(item.get("metrics", {}).get("retained", 0) for item in ticker_results))
+        else:
+            analysis = news_service.analyze_news(sector_lower, [])
+            news_count = 0
+
         return {
             "sector": sector_lower,
             "timestamp": datetime.now().isoformat(),
-            "news_count": len(news_items),
+            "news_count": news_count,
             "analysis": analysis,
             "status": "success"
         }
@@ -524,7 +598,7 @@ async def get_options_suggestions(ticker: str) -> Dict:
     if not ticker or not isinstance(ticker, str):
         raise HTTPException(status_code=400, detail="Invalid ticker parameter")
     
-    if inference_service is None or options_analyzer is None:
+    if inference_service is None or news_service is None:
         logger.error("Required services not initialized")
         raise HTTPException(status_code=503, detail="Service not ready")
     
@@ -532,44 +606,94 @@ async def get_options_suggestions(ticker: str) -> Dict:
     
     try:
         logger.info(f"Generating options for {ticker_upper}")
-        # Get forecast first
-        forecast = inference_service.forecast_hourly(ticker_upper)
-        
-        if forecast is None:
-            raise HTTPException(status_code=500, detail="Forecast service failed")
-        
-        if forecast.get("status") == "error":
-            logger.warning(f"Options forecast error for {ticker_upper}: {forecast.get('error')}")
-            raise HTTPException(
-                status_code=400,
-                detail=f"Could not generate forecast for {ticker_upper}"
-            )
-        
-        current_price = forecast.get("current_price", 0)
-        forecast_price = forecast.get("forecast_10_hours", [{}])[-1].get("forecast", current_price)
-        
-        # Determine direction from forecast
-        price_change = (forecast_price - current_price) / current_price if current_price > 0 else 0
-        if price_change > 0.005:
-            pred_class = 2  # Bullish
-        elif price_change < -0.005:
-            pred_class = 0  # Bearish
-        else:
-            pred_class = 1  # Neutral
-        
-        # Get average confidence from forecast
-        confidences = [p.get("confidence", 0.5) for p in forecast.get("forecast_10_hours", [])]
-        avg_confidence = np.mean(confidences) if confidences else 0.5
-        
-        # Generate options suggestions
-        options = options_analyzer.suggest_options(
+        sector = None
+        ticker_map = inference_service.get_sector_ticker_mapping()
+        for sec, data in ticker_map.get("sectors", {}).items():
+            if ticker_upper in data.get("tickers", []):
+                sector = sec
+                break
+
+        news_result = news_service.analyze_ticker_news(
             ticker=ticker_upper,
-            current_price=current_price,
-            forecast_price=forecast_price,
-            forecast_confidence=avg_confidence,
-            pred_class=pred_class
+            sector=sector,
+            bank_name=ticker_upper,
+            max_items=8,
         )
-        
+        sentiment_score = float(news_result.get("sentiment_score", 0.0))
+        sentiment_probs = _score_to_news_probs(sentiment_score)
+
+        options = inference_service.build_options_analysis(
+            ticker=ticker_upper,
+            sector=sector,
+            sentiment_probs=sentiment_probs,
+            sentiment_score=sentiment_score,
+        )
+
+        options["news"] = {
+            "sentiment": news_result.get("sentiment", "neutral"),
+            "sentiment_score": sentiment_score,
+            "summary": news_result.get("summary", ""),
+            "status": news_result.get("status", "unknown"),
+        }
+
+        if (
+            not options.get("table_rows")
+            and options_analyzer is not None
+            and options.get("status") == "error"
+            and not _is_unsupported_ticker_or_sector_error(options.get("error"))
+        ):
+            fallback_reason = options.get("error")
+            fallback_failure_detail = None
+
+            try:
+                forecast = inference_service.forecast_hourly(ticker_upper, sector=sector)
+                current_price = float(forecast.get("current_price", 0.0))
+                forecast_price = float(
+                    (forecast.get("forecast_10_hours", [{}])[-1] or {}).get("forecast", current_price)
+                )
+                price_change = (forecast_price - current_price) / current_price if current_price > 0 else 0.0
+                pred_class = 2 if price_change > 0.005 else 0 if price_change < -0.005 else 1
+                confidences = [
+                    float(point.get("confidence", 0.5))
+                    for point in forecast.get("forecast_10_hours", [])
+                    if isinstance(point, dict)
+                ]
+                avg_confidence = float(np.mean(confidences)) if confidences else 0.5
+
+                fallback = options_analyzer.suggest_options(
+                    ticker=ticker_upper,
+                    current_price=current_price,
+                    forecast_price=forecast_price,
+                    forecast_confidence=avg_confidence,
+                    pred_class=pred_class,
+                )
+
+                suggested_options = fallback.get("suggested_options", []) if isinstance(fallback, dict) else []
+                fallback_error = fallback.get("error") if isinstance(fallback, dict) else "invalid_fallback_response"
+
+                if fallback_error:
+                    fallback_failure_detail = str(fallback_error)
+                elif not isinstance(suggested_options, list) or not suggested_options:
+                    fallback_failure_detail = "empty_suggestions"
+                else:
+                    options["status"] = "success_fallback"
+                    options.pop("error", None)
+                    options["table_rows"] = options.get("table_rows") or []
+                    options["suggested_options"] = suggested_options
+                    if fallback_reason:
+                        options["fallback_reason"] = fallback_reason
+            except Exception as fallback_exc:
+                fallback_failure_detail = str(fallback_exc)
+
+            if fallback_failure_detail:
+                options["status"] = "error"
+                options["error"] = "fallback_failed"
+                options["table_rows"] = options.get("table_rows") or []
+                options["suggested_options"] = options.get("suggested_options") or []
+                if fallback_reason:
+                    options["fallback_reason"] = fallback_reason
+                options["fallback_detail"] = fallback_failure_detail
+
         return options
     except HTTPException:
         raise
@@ -609,47 +733,31 @@ async def get_ticker_news(ticker: str) -> Dict:
     ticker_upper = ticker.upper()
     
     try:
-        # Get sector for ticker
         sector = None
         ticker_map = inference_service.get_sector_ticker_mapping()
         for sec, data in ticker_map.get("sectors", {}).items():
             if ticker_upper in data.get("tickers", []):
                 sector = sec
                 break
-        
-        if not sector:
-            # Try to fetch generic news
-            return {
-                "ticker": ticker_upper,
-                "sentiment": "neutral",
-                "sentiment_score": 0.0,
-                "summary": f"No sector mapping found for {ticker_upper}",
-                "key_signals": [],
-                "last_updated": datetime.now().isoformat(),
-                "status": "no_sector_match"
-            }
-        
-        # Placeholder context keeps ticker-oriented analysis deterministic without external fetches.
-        news_items = [
-            f"{ticker_upper} trading activity in {sector} sector remains in focus",
-            f"Analysts update outlook for {ticker_upper} within {sector} peers",
-            f"Macro and sector headlines continue to influence {ticker_upper}",
-            f"Institutional positioning shifts around {ticker_upper} and {sector}",
-            f"Near-term catalysts monitored for {ticker_upper} in {sector}"
-        ]
 
-        # Analyze news for sector
-        analysis = news_service.analyze_news(sector, news_items)
-        
+        analysis = news_service.analyze_ticker_news(
+            ticker=ticker_upper,
+            sector=sector,
+            bank_name=ticker_upper,
+            max_items=10,
+        )
+
         return {
             "ticker": ticker_upper,
             "sector": sector,
             "sentiment": analysis.get("sentiment", "neutral"),
-            "sentiment_score": analysis.get("sentiment_score", 0.0),
-            "summary": analysis.get("summary", ""),
-            "key_signals": analysis.get("signals", []),
+            "sentiment_score": float(analysis.get("sentiment_score", 0.0)),
+            "summary": analysis.get("summary", analysis.get("bank_summary_en", "")),
+            "key_signals": analysis.get("key_signals", []),
+            "news_summaries": analysis.get("news_summaries", []),
+            "metrics": analysis.get("metrics", {}),
             "last_updated": analysis.get("timestamp", datetime.now().isoformat()),
-            "status": analysis.get("status", "success")
+            "status": analysis.get("status", "success"),
         }
     except Exception as e:
         logger.error(f"Error getting news for {ticker}: {str(e)}")

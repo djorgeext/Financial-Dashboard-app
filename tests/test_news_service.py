@@ -213,3 +213,260 @@ class TestCacheKeyGeneration:
         # Second call should return cached result
         result2 = news_service_no_groq.analyze_news("tech", ["news2"])
         assert result2 == result1  # Same cached result (ignores new items)
+
+
+class TestTickerNewsFlow:
+    """Tests for notebook-style ticker news flow."""
+
+    def test_relevance_score_for_one_letter_ticker_requires_token_boundary(self, news_service_no_groq):
+        unrelated_title = "Cloud computing demand remains stable"
+        unrelated_summary = "Macro data points to mixed growth and calmer volatility."
+        explicit_title = "C jumps after earnings beat"
+        explicit_summary = "Investors cited C as a beneficiary of stronger capital returns."
+
+        low_score = news_service_no_groq._relevance_score("C", "banks", unrelated_title, unrelated_summary)
+        high_score = news_service_no_groq._relevance_score("C", "banks", explicit_title, explicit_summary)
+
+        assert low_score < 0.2
+        assert high_score >= 0.55
+        assert high_score > low_score
+
+    def test_analyze_ticker_news_fallback_structure(self, news_service_no_groq, monkeypatch):
+        sample = [
+            {
+                "ticker": "BAC",
+                "title": "Bank of America beats earnings estimates",
+                "summary": "Bank of America reported stronger net interest income and upbeat guidance.",
+                "url": "https://example.com/news1",
+                "url_canonical": "https://example.com/news1",
+                "publisher": "Example",
+                "published_at": "2026-04-12T00:00:00+00:00",
+            }
+        ]
+
+        monkeypatch.setattr(news_service_no_groq, "_fetch_news_from_yf", lambda ticker, limit=30: sample)
+
+        result = news_service_no_groq.analyze_ticker_news("BAC", sector="banks", bank_name="BAC", max_items=5)
+
+        assert result["ticker"] == "BAC"
+        assert "news_summaries" in result
+        assert "bank_summary_en" in result
+        assert "sentiment" in result
+        assert "sentiment_score" in result
+        assert result["status"] in ["success", "success_fallback"]
+
+    def test_analyze_ticker_news_uses_cache(self, news_service_no_groq, monkeypatch):
+        sample = [
+            {
+                "ticker": "AAPL",
+                "title": "Apple sees strong iPhone demand",
+                "summary": "Demand data remained firm across key regions.",
+                "url": "https://example.com/news2",
+                "url_canonical": "https://example.com/news2",
+                "publisher": "Example",
+                "published_at": "2026-04-12T00:00:00+00:00",
+            }
+        ]
+
+        monkeypatch.setattr(news_service_no_groq, "_fetch_news_from_yf", lambda ticker, limit=30: sample)
+
+        first = news_service_no_groq.analyze_ticker_news("AAPL", sector="tech")
+        second = news_service_no_groq.analyze_ticker_news("AAPL", sector="tech")
+
+        assert first == second
+
+    def test_analyze_ticker_news_exception_payload_is_not_cached(self, news_service_no_groq, monkeypatch):
+        call_counter = {"count": 0}
+
+        def _fail_fetch(ticker, limit=30):
+            call_counter["count"] += 1
+            raise RuntimeError("provider_temporarily_unavailable")
+
+        monkeypatch.setattr(news_service_no_groq, "_fetch_news_from_yf", _fail_fetch)
+
+        cache_key = news_service_no_groq._ticker_news_cache_key(
+            ticker="AAPL",
+            sector="tech",
+            max_items=10,
+            bank_name=None,
+        )
+
+        first = news_service_no_groq.analyze_ticker_news("AAPL", sector="tech")
+        second = news_service_no_groq.analyze_ticker_news("AAPL", sector="tech")
+
+        assert first["status"] == "error"
+        assert second["status"] == "error"
+        assert cache_key not in news_service_no_groq.cache
+        assert cache_key not in news_service_no_groq.cache_times
+        assert call_counter["count"] == 2
+
+    def test_analyze_ticker_news_cache_key_differs_by_max_items(self, news_service_no_groq, monkeypatch):
+        call_counter = {"count": 0}
+
+        def fake_fetch(ticker, limit=30):
+            call_counter["count"] += 1
+            return [
+                {
+                    "ticker": ticker,
+                    "title": f"{ticker} reports strong growth {i}",
+                    "summary": f"{ticker} sees continued momentum in core business line {i}.",
+                    "url": f"https://example.com/{i}",
+                    "url_canonical": f"https://example.com/{i}",
+                    "publisher": "Example",
+                    "published_at": "2026-04-12T00:00:00+00:00",
+                }
+                for i in range(5)
+            ]
+
+        monkeypatch.setattr(news_service_no_groq, "_fetch_news_from_yf", fake_fetch)
+
+        first = news_service_no_groq.analyze_ticker_news("AAPL", sector="tech", max_items=1)
+        second = news_service_no_groq.analyze_ticker_news("AAPL", sector="tech", max_items=3)
+
+        assert first["metrics"]["retained"] == 1
+        assert second["metrics"]["retained"] == 3
+        assert call_counter["count"] == 2
+
+    def test_analyze_ticker_news_cache_key_differs_by_sector(self, news_service_no_groq, monkeypatch):
+        call_counter = {"count": 0}
+
+        def fake_fetch(ticker, limit=30):
+            call_counter["count"] += 1
+            return [
+                {
+                    "ticker": ticker,
+                    "title": f"{ticker} reports stable demand",
+                    "summary": f"{ticker} remains in focus for investors.",
+                    "url": "https://example.com/sector",
+                    "url_canonical": "https://example.com/sector",
+                    "publisher": "Example",
+                    "published_at": "2026-04-12T00:00:00+00:00",
+                }
+            ]
+
+        monkeypatch.setattr(news_service_no_groq, "_fetch_news_from_yf", fake_fetch)
+
+        first = news_service_no_groq.analyze_ticker_news("AAPL", sector="tech", max_items=2)
+        second = news_service_no_groq.analyze_ticker_news("AAPL", sector="banks", max_items=2)
+
+        assert first["sector"] == "tech"
+        assert second["sector"] == "banks"
+        assert call_counter["count"] == 2
+
+    def test_clean_llm_output_removes_think_leaks_and_unclosed_blocks(self, news_service_no_groq):
+        raw = "```json\n<think>internal chain\nstill internal"
+        cleaned = news_service_no_groq._clean_llm_output(raw)
+
+        assert cleaned == ""
+        assert "<think" not in cleaned.lower()
+        assert "```" not in cleaned
+
+    def test_normalize_item_summary_rejects_reasoning_without_think_tags(self, news_service_no_groq):
+        source_text = "Apple reported stronger revenue and raised guidance for next quarter."
+        llm_output = (
+            "Let's break this down before finalizing.\n"
+            "First, revenue was stronger than expected.\n"
+            "Tone: positive."
+        )
+
+        normalized = news_service_no_groq._normalize_item_summary_output(llm_output, source_text)
+
+        assert normalized == news_service_no_groq._heuristic_item_summary(source_text)
+
+    def test_normalize_item_summary_accepts_three_lines_and_enforces_labels(self, news_service_no_groq):
+        source_text = "Provider text used only for fallback if needed."
+        llm_output = (
+            "Revenue beat consensus and margins expanded.\n"
+            "Could support improved forward guidance and sentiment.\n"
+            "positive."
+        )
+
+        normalized = news_service_no_groq._normalize_item_summary_output(llm_output, source_text)
+        lines = normalized.splitlines()
+
+        assert len(lines) == 3
+        assert lines[0].startswith("- Key facts:")
+        assert lines[1].startswith("- Business/risk impact:")
+        assert lines[2].startswith("- Tone:")
+
+    def test_normalize_ticker_summary_rejects_reasoning_like_labeled_lines(self, news_service_no_groq):
+        item_summaries = [
+            "- Key facts: Revenue beat estimates.\n- Business/risk impact: Supports guidance confidence.\n- Tone: positive.",
+        ]
+        ticker = "AAPL"
+        llm_output = (
+            "Overview: Let's break this down before the final signal.\n"
+            "Risks: Margin pressure from costs.\n"
+            "Catalysts: Product cycle momentum.\n"
+            "Final signal: Constructive/Bullish."
+        )
+
+        normalized = news_service_no_groq._normalize_ticker_summary_output(llm_output, item_summaries, ticker)
+
+        assert normalized == news_service_no_groq._heuristic_ticker_summary(item_summaries, ticker)
+        assert "Let's break this down" not in normalized
+
+    def test_normalize_ticker_summary_accepts_clean_labeled_output_in_order(self, news_service_no_groq):
+        item_summaries = [
+            "- Key facts: Demand remained stable.\n- Business/risk impact: Supports earnings visibility.\n- Tone: neutral.",
+        ]
+        ticker = "MSFT"
+        llm_output = (
+            "Overview: Headline flow is balanced with moderate upside drivers.\n"
+            "Risks: Slower enterprise spending could delay expansion.\n"
+            "Catalysts: Upcoming earnings and cloud bookings updates may improve visibility.\n"
+            "Final signal: Neutral."
+        )
+
+        normalized = news_service_no_groq._normalize_ticker_summary_output(llm_output, item_summaries, ticker)
+
+        assert normalized == llm_output
+
+    def test_ticker_news_graceful_without_chromadb_collection(self, news_service_no_groq, monkeypatch):
+        sample = [
+            {
+                "ticker": "AAPL",
+                "title": "Apple sees resilient services growth",
+                "summary": "Services and wearables showed stable momentum.",
+                "url": "https://example.com/chroma-fallback",
+                "url_canonical": "https://example.com/chroma-fallback",
+                "publisher": "Example",
+                "published_at": "2026-04-12T00:00:00+00:00",
+            }
+        ]
+
+        news_service_no_groq._chroma_collection = None
+        monkeypatch.setattr(news_service_no_groq, "_fetch_news_from_yf", lambda ticker, limit=30: sample)
+
+        result = news_service_no_groq.analyze_ticker_news("AAPL", sector="tech", max_items=3)
+
+        assert result["status"] in ["success", "success_fallback"]
+        assert result["metrics"]["retained"] == 1
+
+    def test_ticker_news_reuses_persisted_item_summary_when_available(self, news_service_no_groq, monkeypatch):
+        sample = [
+            {
+                "ticker": "BAC",
+                "title": "Bank of America expands digital onboarding",
+                "summary": "Management highlighted lower service costs and customer adoption.",
+                "url": "https://example.com/persisted",
+                "url_canonical": "https://example.com/persisted",
+                "publisher": "Example",
+                "published_at": "2026-04-12T00:00:00+00:00",
+            }
+        ]
+
+        monkeypatch.setattr(news_service_no_groq, "_fetch_news_from_yf", lambda ticker, limit=30: sample)
+        monkeypatch.setattr(news_service_no_groq, "_get_persisted_news_summary", lambda item_id: "- Key facts: Cached summary.\n- Business/risk impact: Cached impact.\n- Tone: neutral.")
+        monkeypatch.setattr(news_service_no_groq, "_persist_news_summary", lambda item_id, summary, metadata: False)
+
+        def _must_not_run(*args, **kwargs):
+            raise AssertionError("_summarize_news_item should not be called when persisted summary is available")
+
+        monkeypatch.setattr(news_service_no_groq, "_summarize_news_item", _must_not_run)
+
+        result = news_service_no_groq.analyze_ticker_news("BAC", sector="banks", max_items=2)
+
+        assert result["metrics"]["persisted_reused"] == 1
+        assert result["metrics"]["summaries_generated"] == 0
+        assert result["news_summaries"][0]["summary_en"].startswith("- Key facts:")
