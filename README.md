@@ -53,7 +53,7 @@ A production-ready financial dashboard system that combines real-time market dat
 ## Installation
 
 ### Prerequisites
-- Python 3.8+
+- Python 3.9+
 - PyTorch (GPU or CPU)
 - Pre-trained model files in `models/` directory
 

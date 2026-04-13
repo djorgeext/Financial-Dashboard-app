@@ -38,6 +38,18 @@ def test_draw_options_avoids_innerhtml_string_building_for_rows():
     assert "suggested_options" in body
     assert "rowsToRender" in body
     assert "!rows.length && !suggestedOptions.length" in body
+    assert "Barrera a 10 horas" in body
+    assert "'Barrera'," not in body
+
+
+def test_dashboard_neutral_forecast_state_hides_chart_and_table_with_banner_message():
+    html = DASHBOARD_PATH.read_text(encoding="utf-8")
+
+    assert "function isNeutralForecastOrUnavailable(d)" in html
+    assert "function showNeutralOrUnavailableState(message)" in html
+    assert "showNeutralOrUnavailableState('Neutral forecast or not available');" in html
+    assert "neutral.className = 'no-data';" in html
+    assert "neutral.textContent = 'Neutral forecast or not available';" in html
 
 
 def test_chart_uses_non_fragmented_continuous_axis_with_day_hour_ticks():
@@ -79,3 +91,14 @@ def test_last_updated_uses_new_york_timezone_formatter():
     assert "timeZone: 'America/New_York'" in html
     assert "const formattedLastUpdate = lastUpdatedFormatter.format(new Date());" in html
     assert "new Date().toLocaleTimeString()" not in html
+
+
+def test_dashboard_uses_white_background_and_black_text_for_table_and_news_summary():
+    html = DASHBOARD_PATH.read_text(encoding="utf-8")
+
+    assert "background: #ffffff;" in html
+    assert "color: #000000;" in html
+    assert ".results-table th { background: #e2e8f0; color: #000000; position: sticky; top: 0; }" in html
+    assert "#newsContainer { color: #000000; }" in html
+    assert "#newsContainer .no-data { color: #000000; }" in html
+    assert ".news-list, .news-item { color: #000000; }" in html

@@ -190,6 +190,235 @@ def test_pipeline_context_hourly_signal_dominates_daily_for_option_type(bare_inf
     assert result["barrier_hourly"] == 112.0
 
 
+def test_pipeline_context_hourly_sub_one_percent_move_returns_neutral(bare_inference_service, monkeypatch):
+    daily_hist = _make_hist(500, "D")
+    hourly_hist = _make_hist(1000, "h")
+
+    class FakeTicker:
+        def history(self, period="max", interval=None):
+            return hourly_hist.copy() if interval == "1h" else daily_hist.copy()
+
+    monkeypatch.setattr(inference_module.yf, "Ticker", lambda ticker: FakeTicker())
+
+    full_daily = pd.DataFrame(
+        np.zeros((inference_module.SEQ_LEN_DAILY + inference_module.MIN_INFERENCE_BUFFER + 2, 4))
+    )
+    full_hourly = pd.DataFrame(
+        np.zeros((inference_module.SEQ_LEN_HOURLY + inference_module.MIN_INFERENCE_BUFFER + 2, 4))
+    )
+
+    responses = iter([(daily_hist, full_daily), (hourly_hist, full_hourly)])
+    monkeypatch.setattr(inference_module, "engineer_features", lambda hist, close: next(responses))
+    monkeypatch.setattr(inference_module, "apply_robust_normalization", lambda x, scaler: x)
+
+    preds = iter(
+        [
+            {
+                "pred_primary": 1,
+                "meta_pred": 0,
+                "confidence": 0.61,
+                "probs": [0.1, 0.8, 0.1],
+                "x_tensor": None,
+            },
+            {
+                "pred_primary": 1,
+                "meta_pred": 0,
+                "confidence": 0.58,
+                "probs": [0.1, 0.8, 0.1],
+                "x_tensor": None,
+            },
+        ]
+    )
+    monkeypatch.setattr(bare_inference_service, "_run_primary_and_meta", lambda *args, **kwargs: next(preds))
+
+    barrier_values = iter(
+        [
+            {
+                "p_t": 120.0,
+                "vol_t": 0.02,
+                "drift_val": 0.001,
+                "upper_barrier": 125.0,
+                "lower_barrier": 115.0,
+                "is_call": True,
+                "is_put": False,
+            },
+            {
+                "p_t": 120.0,
+                "vol_t": 0.03,
+                "drift_val": -0.001,
+                "upper_barrier": 120.9,
+                "lower_barrier": 118.8,
+                "is_call": False,
+                "is_put": False,
+            },
+        ]
+    )
+    monkeypatch.setattr(bare_inference_service, "_compute_barriers", lambda *args, **kwargs: next(barrier_values))
+
+    result = bare_inference_service._pipeline_context("AAPL", sector="tech")
+
+    assert result["status"] == "success"
+    assert result["op_type"] == "neutral"
+    assert result["target_type"] == 0
+    assert result["is_neutral"] is True
+    assert result["has_opportunity"] is False
+    assert result["no_signal_reason"] == "hourly_threshold_not_met"
+
+
+def test_pipeline_context_hourly_exact_plus_one_percent_is_call_opportunity(bare_inference_service, monkeypatch):
+    daily_hist = _make_hist(500, "D")
+    hourly_hist = _make_hist(1000, "h")
+
+    class FakeTicker:
+        def history(self, period="max", interval=None):
+            return hourly_hist.copy() if interval == "1h" else daily_hist.copy()
+
+    monkeypatch.setattr(inference_module.yf, "Ticker", lambda ticker: FakeTicker())
+
+    full_daily = pd.DataFrame(
+        np.zeros((inference_module.SEQ_LEN_DAILY + inference_module.MIN_INFERENCE_BUFFER + 2, 4))
+    )
+    full_hourly = pd.DataFrame(
+        np.zeros((inference_module.SEQ_LEN_HOURLY + inference_module.MIN_INFERENCE_BUFFER + 2, 4))
+    )
+
+    responses = iter([(daily_hist, full_daily), (hourly_hist, full_hourly)])
+    monkeypatch.setattr(inference_module, "engineer_features", lambda hist, close: next(responses))
+    monkeypatch.setattr(inference_module, "apply_robust_normalization", lambda x, scaler: x)
+
+    preds = iter(
+        [
+            {
+                "pred_primary": 0,
+                "meta_pred": 0,
+                "confidence": 0.61,
+                "probs": [0.7, 0.2, 0.1],
+                "x_tensor": None,
+            },
+            {
+                "pred_primary": 1,
+                "meta_pred": 0,
+                "confidence": 0.58,
+                "probs": [0.1, 0.8, 0.1],
+                "x_tensor": None,
+            },
+        ]
+    )
+    monkeypatch.setattr(bare_inference_service, "_run_primary_and_meta", lambda *args, **kwargs: next(preds))
+
+    barrier_values = iter(
+        [
+            {
+                "p_t": 120.0,
+                "vol_t": 0.02,
+                "drift_val": 0.001,
+                "upper_barrier": 125.0,
+                "lower_barrier": 115.0,
+                "is_call": False,
+                "is_put": False,
+            },
+            {
+                "p_t": 120.0,
+                "vol_t": 0.03,
+                "drift_val": -0.001,
+                "upper_barrier": 121.2,
+                "lower_barrier": 118.8,
+                "is_call": True,
+                "is_put": False,
+            },
+        ]
+    )
+    monkeypatch.setattr(bare_inference_service, "_compute_barriers", lambda *args, **kwargs: next(barrier_values))
+
+    result = bare_inference_service._pipeline_context("AAPL", sector="tech")
+
+    assert result["status"] == "success"
+    assert result["op_type"] == "call"
+    assert result["target_type"] == 1
+    assert result["is_neutral"] is False
+    assert result["has_opportunity"] is True
+    assert result["barrier"] == pytest.approx(121.2)
+    assert result["barrier_hourly"] == pytest.approx(121.2)
+    assert result["hourly_move_pct"] == pytest.approx(0.01)
+
+
+def test_pipeline_context_hourly_exact_minus_one_percent_is_put_opportunity(bare_inference_service, monkeypatch):
+    daily_hist = _make_hist(500, "D")
+    hourly_hist = _make_hist(1000, "h")
+
+    class FakeTicker:
+        def history(self, period="max", interval=None):
+            return hourly_hist.copy() if interval == "1h" else daily_hist.copy()
+
+    monkeypatch.setattr(inference_module.yf, "Ticker", lambda ticker: FakeTicker())
+
+    full_daily = pd.DataFrame(
+        np.zeros((inference_module.SEQ_LEN_DAILY + inference_module.MIN_INFERENCE_BUFFER + 2, 4))
+    )
+    full_hourly = pd.DataFrame(
+        np.zeros((inference_module.SEQ_LEN_HOURLY + inference_module.MIN_INFERENCE_BUFFER + 2, 4))
+    )
+
+    responses = iter([(daily_hist, full_daily), (hourly_hist, full_hourly)])
+    monkeypatch.setattr(inference_module, "engineer_features", lambda hist, close: next(responses))
+    monkeypatch.setattr(inference_module, "apply_robust_normalization", lambda x, scaler: x)
+
+    preds = iter(
+        [
+            {
+                "pred_primary": 0,
+                "meta_pred": 0,
+                "confidence": 0.61,
+                "probs": [0.7, 0.2, 0.1],
+                "x_tensor": None,
+            },
+            {
+                "pred_primary": 2,
+                "meta_pred": 0,
+                "confidence": 0.58,
+                "probs": [0.1, 0.2, 0.7],
+                "x_tensor": None,
+            },
+        ]
+    )
+    monkeypatch.setattr(bare_inference_service, "_run_primary_and_meta", lambda *args, **kwargs: next(preds))
+
+    barrier_values = iter(
+        [
+            {
+                "p_t": 120.0,
+                "vol_t": 0.02,
+                "drift_val": 0.001,
+                "upper_barrier": 125.0,
+                "lower_barrier": 115.0,
+                "is_call": False,
+                "is_put": False,
+            },
+            {
+                "p_t": 120.0,
+                "vol_t": 0.03,
+                "drift_val": -0.001,
+                "upper_barrier": 121.2,
+                "lower_barrier": 118.8,
+                "is_call": False,
+                "is_put": True,
+            },
+        ]
+    )
+    monkeypatch.setattr(bare_inference_service, "_compute_barriers", lambda *args, **kwargs: next(barrier_values))
+
+    result = bare_inference_service._pipeline_context("AAPL", sector="tech")
+
+    assert result["status"] == "success"
+    assert result["op_type"] == "put"
+    assert result["target_type"] == 2
+    assert result["is_neutral"] is False
+    assert result["has_opportunity"] is True
+    assert result["barrier"] == pytest.approx(118.8)
+    assert result["barrier_hourly"] == pytest.approx(118.8)
+    assert result["hourly_move_pct"] == pytest.approx(-0.01)
+
+
 def test_to_market_timezone_localizes_naive_index_as_market_timezone(bare_inference_service):
     idx = pd.date_range("2024-01-02 09:30:00", periods=3, freq="h")
     df = pd.DataFrame({"Close": [100.0, 101.0, 102.0]}, index=idx)

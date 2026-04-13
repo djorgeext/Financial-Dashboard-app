@@ -9,7 +9,7 @@
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto;
-            background: linear-gradient(135deg, #0f172a 0%, #1a2540 100%);
+            background: #ffffff;
             color: #e2e8f0;
             min-height: 100vh;
             padding: 20px;
@@ -35,10 +35,13 @@
         .no-data { text-align: center; padding: 40px; color: #94a3b8; }
         .table-wrap { overflow-x: auto; }
         .results-table { width: 100%; border-collapse: collapse; min-width: 1250px; }
-        .results-table th, .results-table td { border-bottom: 1px solid #334155; padding: 8px 10px; text-align: left; font-size: 0.84rem; }
-        .results-table th { color: #bfdbfe; background: rgba(15, 23, 42, 0.7); position: sticky; top: 0; }
+        .results-table th, .results-table td { border-bottom: 1px solid #334155; padding: 8px 10px; text-align: left; font-size: 0.84rem; color: #000000; }
+        .results-table th { background: #e2e8f0; color: #000000; position: sticky; top: 0; }
+        #newsContainer { color: #000000; }
+        #newsContainer .no-data { color: #000000; }
         .news-list { margin-top: 10px; }
-        .news-item { margin-bottom: 8px; color: #cbd5e1; }
+        .news-list, .news-item { color: #000000; }
+        .news-item { margin-bottom: 8px; }
         @media (max-width: 900px) {
             .controls { grid-template-columns: 1fr; }
             #chartContainer { height: 360px; }
@@ -132,6 +135,52 @@
             }
             return fallback;
         }
+        function isNeutralForecastOrUnavailable(d) {
+            if (!d || typeof d !== 'object') {
+                return true;
+            }
+
+            const status = String(d.status || '').toLowerCase();
+            const opType = String(d.op_type || '').toLowerCase();
+            if (status === 'success_no_signal' || opType === 'neutral' || d.is_neutral === true) {
+                return true;
+            }
+
+            const current = Number(d.current_price);
+            const barrier10h = Number(d.barrier_hourly);
+            if (!Number.isFinite(current) || current <= 0 || !Number.isFinite(barrier10h)) {
+                return true;
+            }
+
+            const movement = (barrier10h - current) / current;
+            return movement > -0.01 && movement < 0.01;
+        }
+        function showNeutralOrUnavailableState(message) {
+            const chartContainer = document.getElementById('chartContainer');
+            if (window.Plotly && typeof Plotly.purge === 'function') {
+                try {
+                    Plotly.purge(chartContainer);
+                } catch (e) {
+                    // Ignore purge errors and continue rendering fallback state.
+                }
+            }
+            while (chartContainer.firstChild) {
+                chartContainer.removeChild(chartContainer.firstChild);
+            }
+            const chartEmpty = document.createElement('div');
+            chartEmpty.className = 'no-data';
+            chartEmpty.textContent = message;
+            chartContainer.appendChild(chartEmpty);
+
+            const optionsContainer = document.getElementById('optionsContainer');
+            while (optionsContainer.firstChild) {
+                optionsContainer.removeChild(optionsContainer.firstChild);
+            }
+            const optionsEmpty = document.createElement('div');
+            optionsEmpty.className = 'no-data';
+            optionsEmpty.textContent = message;
+            optionsContainer.appendChild(optionsEmpty);
+        }
         async function runAnalysis() {
             const t = document.getElementById('tickerSelect').value;
             if (!t) return;
@@ -149,18 +198,23 @@
                 if (!fd || typeof fd !== 'object' || fd.error) {
                     throw new Error(getApiErrorMessage(fd, 'Invalid forecast response'));
                 }
-                state.forecastData = fd;
-                drawChart();
+                if (isNeutralForecastOrUnavailable(fd)) {
+                    state.forecastData = null;
+                    showNeutralOrUnavailableState('Neutral forecast or not available');
+                } else {
+                    state.forecastData = fd;
+                    drawChart();
 
-                const or = await fetch(API_BASE + '/options/' + t);
-                const od = await parseJsonSafe(or);
-                if (!or.ok) {
-                    throw new Error(getApiErrorMessage(od, 'Options request failed'));
+                    const or = await fetch(API_BASE + '/options/' + t);
+                    const od = await parseJsonSafe(or);
+                    if (!or.ok) {
+                        throw new Error(getApiErrorMessage(od, 'Options request failed'));
+                    }
+                    if (!od || typeof od !== 'object' || od.error) {
+                        throw new Error(getApiErrorMessage(od, 'Invalid options response'));
+                    }
+                    drawOptions(od);
                 }
-                if (!od || typeof od !== 'object' || od.error) {
-                    throw new Error(getApiErrorMessage(od, 'Invalid options response'));
-                }
-                drawOptions(od);
 
                 const nr = await fetch(API_BASE + '/news/ticker/' + t);
                 const nd = await parseJsonSafe(nr);
@@ -434,6 +488,17 @@
                 container.removeChild(container.firstChild);
             }
 
+            const status = String((d && d.status) || '').toLowerCase();
+            const opType = String((d && d.op_type) || '').toLowerCase();
+            const isNeutralNoSignal = status === 'success_no_signal' || opType === 'neutral' || (d && d.is_neutral === true);
+            if (isNeutralNoSignal) {
+                const neutral = document.createElement('div');
+                neutral.className = 'no-data';
+                neutral.textContent = 'Neutral forecast or not available';
+                container.appendChild(neutral);
+                return;
+            }
+
             const rows = Array.isArray(d.table_rows) ? d.table_rows : [];
             const suggestedOptions = Array.isArray(d.suggested_options) ? d.suggested_options : [];
             if (!rows.length && !suggestedOptions.length) {
@@ -446,7 +511,7 @@
             const usePrimaryRows = rows.length > 0;
             const columns = usePrimaryRows
                 ? [
-                    'Fecha', 'Sector', 'Ticker', 'Tipo', 'Precio Actual', 'Barrera', 'Barrera a 10 hrs',
+                    'Fecha', 'Sector', 'Ticker', 'Tipo', 'Precio Actual', 'Barrera a 10 horas',
                     'Vencimiento', 'Strike', 'Ask', 'IV', 'Prob. Mercado', 'Prob. Final (Bayes)', 'Sentimiento Score'
                 ]
                 : ['option_type', 'strike', 'expiration', 'ask', 'iv', 'market_probability', 'probability', 'recommendation'];

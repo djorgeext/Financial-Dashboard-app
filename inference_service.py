@@ -31,6 +31,7 @@ SEQ_LEN_HOURLY = 40
 TBM_HORIZON_DAILY = 2
 TBM_HORIZON_HOURLY = 10
 TBM_K = 1
+SIGNAL_THRESHOLD = 0.01
 MIN_INFERENCE_BUFFER = 20
 MARKET_TIMEZONE = "America/New_York"
 
@@ -438,62 +439,39 @@ class InferenceService:
         daily_barriers = self._compute_barriers(df_daily, daily_pred["pred_primary"], TBM_HORIZON_DAILY, TBM_K)
         hourly_barriers = self._compute_barriers(df_hourly, hourly_pred["pred_primary"], TBM_HORIZON_HOURLY, TBM_K)
 
-        is_call = daily_barriers["is_call"]
-        is_put = daily_barriers["is_put"]
-        is_call_hourly = hourly_barriers["is_call"]
-        is_put_hourly = hourly_barriers["is_put"]
-        has_hourly_signal = is_call_hourly or is_put_hourly
-        has_daily_signal = is_call or is_put
-        has_opportunity = has_hourly_signal or has_daily_signal
+        # Enforce notebook-style 10-hour gating for recommendations.
+        # CALL only if hourly barrier >= current * (1 + threshold)
+        # PUT only if hourly barrier <= current * (1 - threshold)
+        # Otherwise neutral.
+        hourly_current = float(hourly_barriers["p_t"])
+        pred_hourly = int(hourly_pred.get("pred_primary", 0))
+        if pred_hourly == 1:
+            barrier_hourly_signal = float(hourly_barriers["upper_barrier"])
+        elif pred_hourly == 2:
+            barrier_hourly_signal = float(hourly_barriers["lower_barrier"])
+        else:
+            barrier_hourly_signal = hourly_current
 
-        selected_direction = "neutral"
-        source = "none"
-        if has_hourly_signal:
-            source = "hourly"
-            if is_call_hourly and not is_put_hourly:
-                selected_direction = "call"
-            elif is_put_hourly and not is_call_hourly:
-                selected_direction = "put"
-            else:
-                # Conflict-safe ordering: keep hourly dominance, then use hourly primary as tie-break.
-                pred_hourly = int(hourly_pred.get("pred_primary", 0))
-                if pred_hourly == 1:
-                    selected_direction = "call"
-                elif pred_hourly == 2:
-                    selected_direction = "put"
-                else:
-                    selected_direction = "call"
-        elif has_daily_signal:
-            source = "daily"
-            if is_call and not is_put:
-                selected_direction = "call"
-            elif is_put and not is_call:
-                selected_direction = "put"
-            else:
-                pred_daily = int(daily_pred.get("pred_primary", 0))
-                if pred_daily == 1:
-                    selected_direction = "call"
-                elif pred_daily == 2:
-                    selected_direction = "put"
+        upper_threshold = hourly_current * (1.0 + SIGNAL_THRESHOLD)
+        lower_threshold = hourly_current * (1.0 - SIGNAL_THRESHOLD)
 
-        if selected_direction == "call":
+        if pred_hourly == 1 and barrier_hourly_signal >= upper_threshold:
             op_type = "call"
             target_type = 1
-            barrier = hourly_barriers["upper_barrier"] if source == "hourly" else daily_barriers["upper_barrier"]
-            barrier_hourly = hourly_barriers["upper_barrier"]
             no_signal_reason = ""
-        elif selected_direction == "put":
+        elif pred_hourly == 2 and barrier_hourly_signal <= lower_threshold:
             op_type = "put"
             target_type = 2
-            barrier = hourly_barriers["lower_barrier"] if source == "hourly" else daily_barriers["lower_barrier"]
-            barrier_hourly = hourly_barriers["lower_barrier"]
             no_signal_reason = ""
         else:
             op_type = "neutral"
             target_type = 0
-            barrier = daily_barriers["p_t"]
-            barrier_hourly = hourly_barriers["p_t"]
-            no_signal_reason = "barrier_criteria_not_met"
+            no_signal_reason = "hourly_threshold_not_met" if pred_hourly in {1, 2} else "hourly_primary_neutral"
+
+        hourly_move_pct = (barrier_hourly_signal - hourly_current) / hourly_current if hourly_current > 0 else 0.0
+        has_opportunity = target_type in {1, 2}
+        barrier = barrier_hourly_signal
+        barrier_hourly = barrier_hourly_signal
 
         return {
             "status": "success",
@@ -509,6 +487,8 @@ class InferenceService:
             "target_type": target_type,
             "barrier": float(barrier),
             "barrier_hourly": float(barrier_hourly),
+            "hourly_move_pct": float(hourly_move_pct),
+            "is_neutral": bool(target_type == 0),
             "has_opportunity": has_opportunity,
             "no_signal_reason": no_signal_reason,
         }
@@ -604,6 +584,8 @@ class InferenceService:
             "forecast_low": float(np.min(forecast_arr)),
             "current_price": current_price,
             "op_type": context["op_type"],
+            "is_neutral": bool(context.get("is_neutral", context["target_type"] == 0)),
+            "movement_10h_pct": float(context.get("hourly_move_pct", 0.0)),
             "barrier": float(context["barrier"]),
             "barrier_hourly": float(context["barrier_hourly"]),
             "confidence_daily": float(context["daily_pred"]["confidence"]),
@@ -611,6 +593,8 @@ class InferenceService:
             "metadata": {
                 "has_opportunity": bool(context["has_opportunity"]),
                 "target_type": int(context["target_type"]),
+                "is_neutral": bool(context.get("is_neutral", context["target_type"] == 0)),
+                "hourly_move_pct": float(context.get("hourly_move_pct", 0.0)),
                 "pred_primary_daily": int(context["daily_pred"]["pred_primary"]),
                 "pred_primary_hourly": int(context["hourly_pred"]["pred_primary"]),
                 "meta_pred_daily": int(context["daily_pred"]["meta_pred"]),
@@ -670,6 +654,8 @@ class InferenceService:
             "forecast_low": float(np.min(forecast_arr)),
             "current_price": current_price,
             "op_type": "neutral",
+            "is_neutral": True,
+            "movement_10h_pct": 0.0,
             "barrier": current_price,
             "barrier_hourly": current_price,
             "confidence_daily": float(context["daily_pred"]["confidence"]),
@@ -677,6 +663,8 @@ class InferenceService:
             "metadata": {
                 "has_opportunity": False,
                 "target_type": 0,
+                "is_neutral": True,
+                "hourly_move_pct": 0.0,
                 "pred_primary_daily": int(context["daily_pred"]["pred_primary"]),
                 "pred_primary_hourly": int(context["hourly_pred"]["pred_primary"]),
                 "meta_pred_daily": int(context["daily_pred"]["meta_pred"]),
@@ -829,10 +817,12 @@ class InferenceService:
                     "sector": context.get("sector", sector),
                     "status": "success_no_signal",
                     "op_type": "neutral",
+                    "is_neutral": True,
                     "target_type": 0,
                     "current_price": current_price,
                     "barrier": current_price,
                     "barrier_hourly": current_price,
+                    "movement_10h_pct": 0.0,
                     "confidence_daily": float(context.get("daily_pred", {}).get("confidence", 0.0)),
                     "confidence_hourly": float(context.get("hourly_pred", {}).get("confidence", 0.0)),
                     "table_rows": [],
@@ -900,8 +890,7 @@ class InferenceService:
                             "Ticker": ticker_upper,
                             "Tipo": context["op_type"].upper(),
                             "Precio Actual": round(float(context["daily_barriers"]["p_t"]), 2),
-                            "Barrera": round(float(context["barrier"]), 2),
-                            "Barrera a 10 hrs": round(float(context["barrier_hourly"]), 2),
+                            "Barrera a 10 horas": round(float(context["barrier_hourly"]), 2),
                             "Vencimiento": str(row["Vencimiento"]),
                             "Strike": float(row["Strike Seleccionado"]),
                             "Ask": float(row["Ask"]),
@@ -935,10 +924,12 @@ class InferenceService:
                 "sector": sector_lower,
                 "status": status,
                 "op_type": context["op_type"],
+                "is_neutral": bool(context.get("is_neutral", context["target_type"] == 0)),
                 "target_type": int(context["target_type"]),
                 "current_price": float(context["daily_barriers"]["p_t"]),
                 "barrier": float(context["barrier"]),
                 "barrier_hourly": float(context["barrier_hourly"]),
+                "movement_10h_pct": float(context.get("hourly_move_pct", 0.0)),
                 "confidence_daily": float(context["daily_pred"]["confidence"]),
                 "confidence_hourly": float(context["hourly_pred"]["confidence"]),
                 "table_rows": table_rows,

@@ -57,6 +57,39 @@ def _is_unsupported_ticker_or_sector_error(error_detail: Optional[str]) -> bool:
     )
 
 
+def _safe_float(value: Optional[float], default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _is_forecast_neutral_or_no_signal(forecast: Dict) -> bool:
+    if not isinstance(forecast, dict):
+        return True
+
+    status = str(forecast.get("status", "")).lower()
+    op_type = str(forecast.get("op_type", "")).lower()
+    if status == "success_no_signal" or op_type == "neutral" or bool(forecast.get("is_neutral")):
+        return True
+
+    current_price = _safe_float(forecast.get("current_price"), 0.0)
+    barrier_hourly = _safe_float(forecast.get("barrier_hourly"), float("nan"))
+    if not np.isfinite(barrier_hourly):
+        forecast_10h = forecast.get("forecast_10_hours", [])
+        if isinstance(forecast_10h, list) and forecast_10h:
+            last_point = forecast_10h[-1] if isinstance(forecast_10h[-1], dict) else {}
+            barrier_hourly = _safe_float(last_point.get("forecast"), current_price)
+
+    if current_price <= 0:
+        return True
+    if not np.isfinite(barrier_hourly):
+        return True
+
+    move_10h = (barrier_hourly - current_price) / current_price
+    return (-0.01 < move_10h < 0.01)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
@@ -647,41 +680,66 @@ async def get_options_suggestions(ticker: str) -> Dict:
 
             try:
                 forecast = inference_service.forecast_hourly(ticker_upper, sector=sector)
-                current_price = float(forecast.get("current_price", 0.0))
-                forecast_price = float(
-                    (forecast.get("forecast_10_hours", [{}])[-1] or {}).get("forecast", current_price)
-                )
-                price_change = (forecast_price - current_price) / current_price if current_price > 0 else 0.0
-                pred_class = 2 if price_change > 0.005 else 0 if price_change < -0.005 else 1
-                confidences = [
-                    float(point.get("confidence", 0.5))
-                    for point in forecast.get("forecast_10_hours", [])
-                    if isinstance(point, dict)
-                ]
-                avg_confidence = float(np.mean(confidences)) if confidences else 0.5
+                current_price = _safe_float(forecast.get("current_price"), 0.0)
+                barrier_hourly = _safe_float(forecast.get("barrier_hourly"), float("nan"))
+                if not np.isfinite(barrier_hourly):
+                    forecast_10h = forecast.get("forecast_10_hours", [])
+                    if isinstance(forecast_10h, list) and forecast_10h:
+                        last_point = forecast_10h[-1] if isinstance(forecast_10h[-1], dict) else {}
+                        barrier_hourly = _safe_float(last_point.get("forecast"), current_price)
+                if not np.isfinite(barrier_hourly):
+                    barrier_hourly = current_price
+                move_10h = (barrier_hourly - current_price) / current_price if current_price > 0 else 0.0
 
-                fallback = options_analyzer.suggest_options(
-                    ticker=ticker_upper,
-                    current_price=current_price,
-                    forecast_price=forecast_price,
-                    forecast_confidence=avg_confidence,
-                    pred_class=pred_class,
-                )
-
-                suggested_options = fallback.get("suggested_options", []) if isinstance(fallback, dict) else []
-                fallback_error = fallback.get("error") if isinstance(fallback, dict) else "invalid_fallback_response"
-
-                if fallback_error:
-                    fallback_failure_detail = str(fallback_error)
-                elif not isinstance(suggested_options, list) or not suggested_options:
-                    fallback_failure_detail = "empty_suggestions"
-                else:
-                    options["status"] = "success_fallback"
+                if _is_forecast_neutral_or_no_signal(forecast):
+                    options["status"] = "success_no_signal"
                     options.pop("error", None)
-                    options["table_rows"] = options.get("table_rows") or []
-                    options["suggested_options"] = suggested_options
-                    if fallback_reason:
-                        options["fallback_reason"] = fallback_reason
+                    options["op_type"] = "neutral"
+                    options["is_neutral"] = True
+                    options["target_type"] = 0
+                    options["current_price"] = current_price
+                    options["barrier"] = barrier_hourly
+                    options["barrier_hourly"] = barrier_hourly
+                    options["movement_10h_pct"] = float(move_10h)
+                    options["table_rows"] = []
+                    options["suggested_options"] = []
+
+                    metadata = forecast.get("metadata") if isinstance(forecast.get("metadata"), dict) else {}
+                    options["no_signal_reason"] = (
+                        str(forecast.get("no_signal_reason") or metadata.get("no_signal_reason") or "hourly_threshold_not_met")
+                    )
+                else:
+                    forecast_price = barrier_hourly
+                    pred_class = 2 if move_10h >= 0.01 else 0 if move_10h <= -0.01 else 1
+                    confidences = [
+                        _safe_float(point.get("confidence"), 0.5)
+                        for point in forecast.get("forecast_10_hours", [])
+                        if isinstance(point, dict)
+                    ]
+                    avg_confidence = float(np.mean(confidences)) if confidences else 0.5
+
+                    fallback = options_analyzer.suggest_options(
+                        ticker=ticker_upper,
+                        current_price=current_price,
+                        forecast_price=forecast_price,
+                        forecast_confidence=avg_confidence,
+                        pred_class=pred_class,
+                    )
+
+                    suggested_options = fallback.get("suggested_options", []) if isinstance(fallback, dict) else []
+                    fallback_error = fallback.get("error") if isinstance(fallback, dict) else "invalid_fallback_response"
+
+                    if fallback_error:
+                        fallback_failure_detail = str(fallback_error)
+                    elif not isinstance(suggested_options, list) or not suggested_options:
+                        fallback_failure_detail = "empty_suggestions"
+                    else:
+                        options["status"] = "success_fallback"
+                        options.pop("error", None)
+                        options["table_rows"] = options.get("table_rows") or []
+                        options["suggested_options"] = suggested_options
+                        if fallback_reason:
+                            options["fallback_reason"] = fallback_reason
             except Exception as fallback_exc:
                 fallback_failure_detail = str(fallback_exc)
 
@@ -788,10 +846,15 @@ async def serve_dashboard() -> HTMLResponse:
 
 
 # Static files (CSS, JS, images)
+static_dir = os.path.join(os.path.dirname(__file__), "static")
 try:
-    app.mount("/static", StaticFiles(directory="static"), name="static")
-except Exception as e:
-    logger.warning(f"Static files directory not found: {str(e)}")
+    os.makedirs(static_dir, exist_ok=True)
+    app.mount("/static", StaticFiles(directory=static_dir), name="static")
+except Exception as exc:
+    logger.warning(
+        "Static files setup failed; continuing without /static mount: %s",
+        exc,
+    )
 
 
 # ==================== ERROR HANDLERS ====================

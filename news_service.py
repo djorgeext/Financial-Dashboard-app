@@ -27,7 +27,6 @@ except ImportError:
 
 try:
     chromadb = importlib.import_module("chromadb")
-
     CHROMA_AVAILABLE = True
 except ImportError:
     CHROMA_AVAILABLE = False
@@ -134,14 +133,30 @@ class NewsService:
 
         try:
             os.makedirs(self.chroma_path, exist_ok=True)
-            self._chroma_client = chromadb.PersistentClient(path=self.chroma_path)
+            os.environ["ANONYMIZED_TELEMETRY"] = "false"
+            # Some posthog versions are incompatible with Chroma's capture signature.
+            # Force-disable and no-op capture to avoid startup telemetry errors.
+            try:
+                posthog_module = importlib.import_module("posthog")
+                posthog_module.disabled = True
+                posthog_module.capture = lambda *args, **kwargs: None
+            except Exception:
+                pass
+            chroma_settings = chromadb.config.Settings(anonymized_telemetry=False)
+            self._chroma_client = chromadb.PersistentClient(
+                path=self.chroma_path,
+                settings=chroma_settings,
+            )
             self._chroma_collection = self._chroma_client.get_or_create_collection(
                 name="news_item_summaries"
             )
         except Exception as exc:
             self._chroma_client = None
             self._chroma_collection = None
-            logger.warning("ChromaDB initialization failed, continuing without persistence: %s", exc)
+            logger.warning(
+                "ChromaDB initialization failed, continuing without persistence: %s",
+                exc,
+            )
 
     def _is_cache_valid(self, key: str) -> bool:
         if key not in self.cache_times:

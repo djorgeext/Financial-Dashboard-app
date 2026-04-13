@@ -307,8 +307,7 @@ class TestOptionsEndpoints:
                     "Ticker": "BAC",
                     "Tipo": "CALL",
                     "Precio Actual": 40.12,
-                    "Barrera": 41.02,
-                    "Barrera a 10 hrs": 40.86,
+                    "Barrera a 10 horas": 40.86,
                     "Vencimiento": "2026-04-24",
                     "Strike": 40.5,
                     "Ask": 0.65,
@@ -347,7 +346,8 @@ class TestOptionsEndpoints:
         assert len(data["table_rows"]) == 1
         row = data["table_rows"][0]
         assert "Prob. Final (Bayes)" in row
-        assert "Barrera a 10 hrs" in row
+        assert "Barrera" not in row
+        assert "Barrera a 10 horas" in row
         assert "Sentimiento Score" in row
         assert "news" in data
 
@@ -404,6 +404,68 @@ class TestOptionsEndpoints:
         assert data["table_rows"] == []
         assert data["suggested_options"] == []
         assert data["op_type"] == "neutral"
+        mock_options_analyzer.suggest_options.assert_not_called()
+
+    def test_options_endpoint_error_neutral_forecast_skips_fallback_analyzer(self, client, monkeypatch):
+        mock_inference = Mock()
+        mock_inference.get_sector_ticker_mapping.return_value = {
+            "sectors": {
+                "banks": {"tickers": ["BAC"]}
+            }
+        }
+        mock_inference.build_options_analysis.return_value = {
+            "ticker": "BAC",
+            "sector": "banks",
+            "status": "error",
+            "error": "inference_failed_for_ticker",
+            "table_rows": [],
+            "suggested_options": [],
+        }
+        mock_inference.forecast_hourly.return_value = {
+            "ticker": "BAC",
+            "status": "success_no_signal",
+            "op_type": "neutral",
+            "is_neutral": True,
+            "current_price": 40.0,
+            "barrier_hourly": 40.2,
+            "metadata": {"no_signal_reason": "hourly_threshold_not_met"},
+        }
+
+        mock_news = Mock()
+        mock_news.analyze_ticker_news.return_value = {
+            "sentiment": "neutral",
+            "sentiment_score": 0.0,
+            "summary": "No strong catalyst",
+            "status": "success",
+        }
+
+        mock_options_analyzer = Mock()
+        mock_options_analyzer.suggest_options.return_value = {
+            "suggested_options": [
+                {
+                    "option_type": "call",
+                    "strike": 41.0,
+                    "expiration": "2026-04-24",
+                    "probability": 0.5,
+                }
+            ]
+        }
+
+        monkeypatch.setattr(app_module, "inference_service", mock_inference)
+        monkeypatch.setattr(app_module, "news_service", mock_news)
+        monkeypatch.setattr(app_module, "options_analyzer", mock_options_analyzer)
+
+        response = client.get("/api/options/BAC")
+        assert response.status_code == 200
+
+        data = response.json()
+        assert data["status"] == "success_no_signal"
+        assert data["op_type"] == "neutral"
+        assert data["is_neutral"] is True
+        assert data["table_rows"] == []
+        assert data["suggested_options"] == []
+        assert data["no_signal_reason"] == "hourly_threshold_not_met"
+        mock_inference.forecast_hourly.assert_called_once()
         mock_options_analyzer.suggest_options.assert_not_called()
 
     def test_options_endpoint_unsupported_error_skips_fallback_analyzer(self, client, monkeypatch):
@@ -518,6 +580,67 @@ class TestOptionsEndpoints:
         mock_inference.forecast_hourly.assert_called_once()
         mock_options_analyzer.suggest_options.assert_called_once()
 
+    def test_options_endpoint_fallback_pred_class_uses_barrier_threshold(self, client, monkeypatch):
+        mock_inference = Mock()
+        mock_inference.get_sector_ticker_mapping.return_value = {
+            "sectors": {
+                "banks": {"tickers": ["BAC"]}
+            }
+        }
+        mock_inference.build_options_analysis.return_value = {
+            "ticker": "BAC",
+            "sector": "banks",
+            "status": "error",
+            "error": "inference_failed_for_ticker",
+            "table_rows": [],
+            "suggested_options": [],
+        }
+        mock_inference.forecast_hourly.return_value = {
+            "current_price": 40.0,
+            "barrier_hourly": 39.4,
+            "forecast_10_hours": [
+                {"forecast": 41.5, "confidence": 0.74},
+                {"forecast": 41.8, "confidence": 0.76},
+            ],
+        }
+
+        mock_news = Mock()
+        mock_news.analyze_ticker_news.return_value = {
+            "sentiment": "neutral",
+            "sentiment_score": 0.0,
+            "summary": "Fallback news context",
+            "status": "success",
+        }
+
+        mock_options_analyzer = Mock()
+        mock_options_analyzer.suggest_options.return_value = {
+            "suggested_options": [
+                {
+                    "option_type": "put",
+                    "strike": 39.5,
+                    "expiration": "2026-04-24",
+                    "probability": 0.63,
+                }
+            ]
+        }
+
+        monkeypatch.setattr(app_module, "inference_service", mock_inference)
+        monkeypatch.setattr(app_module, "news_service", mock_news)
+        monkeypatch.setattr(app_module, "options_analyzer", mock_options_analyzer)
+
+        response = client.get("/api/options/BAC")
+        assert response.status_code == 200
+
+        data = response.json()
+        assert data["status"] == "success_fallback"
+        assert data["fallback_reason"] == "inference_failed_for_ticker"
+
+        mock_options_analyzer.suggest_options.assert_called_once()
+        kwargs = mock_options_analyzer.suggest_options.call_args.kwargs
+        assert kwargs["pred_class"] == 0
+        assert kwargs["forecast_price"] == pytest.approx(39.4)
+        assert kwargs["forecast_confidence"] == pytest.approx(0.75)
+
     def test_options_endpoint_fallback_failure_returns_error_state(self, client, monkeypatch):
         mock_inference = Mock()
         mock_inference.get_sector_ticker_mapping.return_value = {
@@ -587,7 +710,7 @@ class TestOptionsEndpoints:
         mock_inference.forecast_hourly.return_value = {
             "current_price": 40.0,
             "forecast_10_hours": [
-                {"forecast": 40.2, "confidence": 0.65},
+                {"forecast": 40.8, "confidence": 0.65},
             ],
         }
 
