@@ -802,12 +802,21 @@ class TestFrontendEndpoints:
     def test_root_endpoint(self, client):
         """Test serving dashboard at root."""
         response = client.get("/")
-        assert response.status_code in [200, 404]  # 404 if dashboard.html not in test context
+        assert response.status_code == 200
+        assert "text/html" in response.headers.get("content-type", "")
     
     def test_dashboard_endpoint(self, client):
         """Test serving dashboard at /dashboard."""
         response = client.get("/dashboard")
-        assert response.status_code in [200, 404]
+        assert response.status_code == 200
+        assert "text/html" in response.headers.get("content-type", "")
+
+    def test_dashboard_css_static_endpoint(self, client):
+        """Test dashboard CSS is served from static mount."""
+        response = client.get("/static/css/dashboard.css")
+        assert response.status_code == 200
+        assert "text/css" in response.headers.get("content-type", "")
+        assert "body {" in response.text
 
 
 class TestErrorHandling:

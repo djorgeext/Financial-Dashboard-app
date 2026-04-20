@@ -1,0 +1,320 @@
+:root {
+    --page-bg: #ffffff;
+    --text-primary: #000000;
+    --text-secondary: #111111;
+    --frame-bg: #ffffff;
+    --frame-border: #d6d6d6;
+    --frame-shadow: 0 0.706rem 1.647rem rgba(15, 23, 42, 0.07);
+    --content-max-width: 69.412rem;
+    --control-bg: #f4f4f4;
+    --control-border: #bcbcbc;
+    --button-top: #d9d9d9;
+    --button-bottom: #bfbfbf;
+    --button-border: #a9a9a9;
+    --button-shadow: 0 0.235rem 0 #9f9f9f, 0 0.647rem 1.059rem rgba(0, 0, 0, 0.14);
+}
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+html {
+    font-size: 106.25%;
+}
+
+body {
+    font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+    background: #ffffff;
+    color: #000000;
+    min-height: 100vh;
+    padding: 1.412rem;
+}
+
+.container {
+    width: 100%;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 1.412rem;
+}
+
+.header,
+.status-bar,
+.controls,
+.section {
+    width: max(100%, var(--content-max-width));
+    margin-left: auto;
+    margin-right: auto;
+}
+.header {
+    text-align: center;
+    padding: 1.294rem 1.412rem 1.059rem;
+    border-bottom: 0.059rem solid #dadada;
+}
+
+.header h1 {
+    font-size: clamp(1.694rem, 2.8vw, 2.212rem);
+    margin-bottom: 0.471rem;
+    color: #000000;
+    letter-spacing: 0.015em;
+}
+
+.header p {
+    color: #000000;
+    opacity: 0.82;
+    font-size: 1.08rem;
+}
+
+.status-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.824rem;
+    padding: 0.941rem 1.294rem;
+    background: var(--frame-bg);
+    border: 0.059rem solid var(--frame-border);
+    border-radius: 0.882rem;
+    box-shadow: var(--frame-shadow);
+    color: #000000;
+}
+
+.status-item {
+    display: flex;
+    align-items: center;
+    gap: 0.706rem;
+}
+
+.status-indicator {
+    width: 0.706rem;
+    height: 0.706rem;
+    border-radius: 58.765rem;
+    background: #16a34a;
+    animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+    0%, 100% {
+        opacity: 1;
+    }
+    50% {
+        opacity: 0.45;
+    }
+}
+
+.controls {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr 1fr;
+    gap: 1.059rem;
+    align-items: end;
+}
+
+.control-group {
+    display: flex;
+    flex-direction: column;
+}
+
+.control-group label {
+    color: #000000;
+    font-size: 1.88rem;
+    margin-bottom: 0.529rem;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+}
+
+.control-group select,
+.control-group input {
+    font-size: 1.88rem;
+    padding: 0.706rem 0.824rem;
+    background: var(--control-bg);
+    border: 0.059rem solid var(--control-border);
+    border-radius: 0.588rem;
+    color: #000000;
+    min-height: 2.824rem;
+}
+
+.control-group select:focus,
+.control-group input:focus,
+.run-button:focus-visible {
+    outline: 0.118rem solid #6b7280;
+    outline-offset: 0.118rem;
+}
+
+button,
+.run-button {
+    font-size: 1.88rem;
+    padding: 0.706rem 1.294rem;
+    background: linear-gradient(180deg, var(--button-top), var(--button-bottom));
+    color: #000000;
+    border: 0.059rem solid var(--button-border);
+    border-radius: 0.588rem;
+    font-weight: 700;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.588rem;
+    box-shadow: var(--button-shadow);
+    transition: transform 0.14s ease, box-shadow 0.14s ease, filter 0.14s ease;
+}
+
+.run-button:hover,
+button:hover {
+    transform: translateY(-0.059rem);
+    box-shadow: 0 0.294rem 0 #989898, 0 0.824rem 1.176rem rgba(0, 0, 0, 0.16);
+    filter: brightness(1.02);
+}
+
+.run-button:active,
+button:active {
+    transform: translateY(0.059rem);
+    box-shadow: 0 0.176rem 0 #8f8f8f, 0 0.412rem 0.824rem rgba(0, 0, 0, 0.12);
+    filter: brightness(0.98);
+}
+
+.run-button:disabled {
+    cursor: not-allowed;
+    opacity: 0.72;
+    transform: none;
+    box-shadow: 0 0.176rem 0 #aaaaaa, 0 0.529rem 0.882rem rgba(0, 0, 0, 0.08);
+}
+
+#errorContainer,
+.section {
+    animation: reveal 360ms ease both;
+}
+
+.section {
+    background: var(--frame-bg);
+    border: 0.059rem solid var(--frame-border);
+    border-radius: 1rem;
+    padding: 1.882rem;
+    box-shadow: var(--frame-shadow);
+}
+
+.section-title {
+    font-size: 1.36rem;
+    font-weight: 700;
+    margin-bottom: 1.176rem;
+    color: #000000;
+}
+
+#chartContainer {
+    width: 100%;
+    height: 29.412rem;
+    border-radius: 0.706rem;
+    background: #ffffff;
+    border: 0.059rem solid #e5e7eb;
+}
+
+.error-message {
+    background: #fee2e2;
+    border: 0.059rem solid #ef4444;
+    border-left: 0.235rem solid #ef4444;
+    color: #000000;
+    border-radius: 0.588rem;
+    padding: 0.824rem 0.941rem;
+}
+
+.no-data {
+    text-align: center;
+    padding: 2.824rem 1.412rem;
+    color: #000000;
+}
+
+.table-wrap {
+    overflow-x: auto;
+}
+
+.results-table {
+    width: 100%;
+    border-collapse: collapse;
+    min-width: 71.765rem;
+    color: #000000;
+}
+
+.results-table th,
+.results-table td {
+    border-bottom: 0.059rem solid #d1d5db;
+    padding: 0.647rem 0.765rem;
+    text-align: left;
+    font-size: 0.94rem;
+    color: #000000;
+}
+
+.results-table th {
+    background: #e2e8f0;
+    color: #000000;
+    position: sticky;
+    top: 0;
+}
+
+#newsContainer {
+    color: #000000;
+}
+
+#newsContainer .no-data {
+    color: #000000;
+}
+
+.news-list,
+.news-item {
+    color: #000000;
+}
+
+.news-list {
+    margin-top: 0.706rem;
+}
+
+.news-item {
+    margin-bottom: 0.588rem;
+}
+
+@keyframes reveal {
+    from {
+        opacity: 0;
+        transform: translateY(0.588rem);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .status-indicator,
+    #errorContainer,
+    .section {
+        animation: none;
+    }
+
+    button,
+    .run-button {
+        transition: none;
+    }
+}
+
+@media (max-width: 57.647rem) {
+    :root {
+        --content-max-width: 100%;
+    }
+
+    .controls {
+        grid-template-columns: 1fr;
+    }
+
+    .status-bar {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+
+    #chartContainer {
+        height: 24.706rem;
+    }
+
+    .section {
+        padding: 1.412rem;
+    }
+}

@@ -22,7 +22,7 @@ A production-ready financial dashboard system that combines real-time market dat
 │  ┌──────────────┐  ┌──────────────┐  ┌────────────┐ │
 │  │  Dashboard   │  │   FastAPI    │  │  Services  │ │
 │  │     HTML     │──│  Backend     │──│  (Groq,    │ │
-│  │     UI       │  │   (app.py)   │  │  yfinance) │ │
+│  │     UI       │  │(backend/app.py)│  │  yfinance) │ │
 │  └──────────────┘  └──────────────┘  └────────────┘ │
 │                           │                           │
 │        ┌──────────────────┼──────────────────┐       │
@@ -128,9 +128,21 @@ NUM_CLASSES=3
 python app.py
 ```
 
+`python app.py` remains the recommended local entrypoint. When `DEBUG=True`,
+the app now starts uvicorn reload mode using an import-string target that is
+compatible with reloader subprocesses.
+
+Optional package execution:
+```bash
+python -m backend.app
+```
+
+Both commands run the same FastAPI backend implementation in
+`backend/app.py`; root `app.py` is a thin compatibility entrypoint.
+
 Or with uvicorn directly:
 ```bash
-uvicorn app:app --host 127.0.0.1 --port 8000 --reload
+uvicorn backend.app:app --host 127.0.0.1 --port 8000 --reload
 ```
 
 The dashboard will be available at: `http://127.0.0.1:8000/`
@@ -138,7 +150,7 @@ The dashboard will be available at: `http://127.0.0.1:8000/`
 ### Production Server
 
 ```bash
-uvicorn app:app --host 0.0.0.0 --port 8000 --workers 4
+uvicorn backend.app:app --host 0.0.0.0 --port 8000 --workers 4
 ```
 
 ## API Endpoints
@@ -233,40 +245,27 @@ pytest tests/ --cov=. --cov-report=html
 
 ## Key Components
 
-### `config.py`
-- Environment configuration
-- API key management (secure Groq key handling)
-- Sector definitions and model mappings
+### Root (`/`) compatibility layer
+- `app.py` is a thin compatibility entrypoint (`python app.py` delegates to `backend.app.main()`).
+- `config.py`, `model_service.py`, `data_fetcher.py`, `news_service.py`, and `news_analysis_2.py` are backward-compatible module wrappers.
 
-### `model_service.py`
-- PyTorch model loading
-- Batch inference
-- Attention weight extraction
-- Error handling for predictions
+### Backend implementation (`backend/`) - real application code
+- `backend/app.py`: FastAPI app, REST endpoints, CORS, and lifecycle wiring.
+- `backend/model_service.py`: PyTorch model loading and inference.
+- `backend/data_fetcher.py`: yfinance data ingestion and caching.
+- `backend/news_service.py`: Groq LLM sentiment and signal extraction.
+- `backend/news_analysis_2.py`: import-safe shim for the legacy notebook artifact.
 
-### `data_fetcher.py`
-- yfinance integration
-- Price data fetching & normalization
-- Feature engineering for models
-- In-memory caching with TTL
-
-### `news_service.py`
-- Groq LLM integration
-- News sentiment classification
-- Trade signal extraction
-- Safe defaults on API failures
-
-### `app.py`
-- FastAPI backend
-- All RESTful endpoints
-- CORS configuration
-- Error handling & logging
+### `news_analysis_2.py` (legacy compatibility)
+- Root `news_analysis_2.py` remains a backward-compatible import alias
+- `backend/news_analysis_2.py` is import-safe and has no heavy side effects
+- Notebook-derived legacy content is kept in `legacy/news_analysis_2_legacy_notebook.txt`
 
 ### `dashboard.html`
 - Single-page application (SPA)
 - Real-time data visualization
 - Responsive design
-- Auto-refresh every 5 minutes
+- Refreshes on user-triggered analysis runs (no fixed auto-refresh loop)
 
 ## Security Considerations
 
@@ -327,15 +326,15 @@ python app.py
 - <500ms inference time per request
 
 ### Frontend
-- CSS-in-HTML for minimal requests
-- Auto-refresh every 5 minutes (configurable)
+- External CSS served from `frontend/static/css/dashboard.css`
+- Data refresh is user-triggered from Run Analysis
 - Responsive design for mobile
 
 ## Known Limitations
 
-1. **Demo Mode**: News items are mocked (would need news API in production)
+1. **News Dependency**: News quality/coverage depends on yfinance feed availability and LLM/API availability
 2. **Single Ticker**: Forecasts show first ticker per sector (expandable)
-3. **Real-time**: Updates every 5 minutes (can be increased)
+3. **Real-time**: Pull-based refresh (no streaming/WebSocket updates yet)
 4. **PyTorch Models**: Require significant memory (GPU recommended)
 
 ## Future Enhancements
@@ -353,11 +352,27 @@ python app.py
 
 ```
 /home/david/Documents/trade/
-├── app.py                           # FastAPI main application
-├── config.py                        # Configuration & secrets
-├── model_service.py                 # PyTorch inference wrapper
-├── data_fetcher.py                  # Financial data pipeline
-├── news_service.py                  # Groq LLM integration
+├── app.py                           # Backward-compatible entrypoint wrapper
+├── config.py                        # Backward-compatible module wrapper
+├── model_service.py                 # Backward-compatible module wrapper
+├── data_fetcher.py                  # Backward-compatible module wrapper
+├── news_service.py                  # Backward-compatible module wrapper
+├── news_analysis_2.py               # Backward-compatible module wrapper
+├── backend/
+│   ├── __init__.py
+│   ├── app.py                       # FastAPI main application
+│   ├── config.py                    # Configuration & secrets
+│   ├── model_service.py             # PyTorch inference wrapper
+│   ├── data_fetcher.py              # Financial data pipeline
+│   ├── news_service.py              # Groq LLM integration
+│   ├── inference_service.py
+│   ├── options_analyzer.py
+│   ├── utils.py
+│   ├── utils_2.py
+│   ├── validate.py
+│   └── news_analysis_2.py           # Import-safe shim
+├── legacy/
+│   └── news_analysis_2_legacy_notebook.txt
 ├── dashboard.html                   # Frontend UI
 ├── requirements.txt                 # Python dependencies
 ├── .gitignore                       # Git exclusions
@@ -373,8 +388,6 @@ python app.py
 │   ├── mining_model_hourly.pth
 │   ├── tech_us_model.pth
 │   └── tech_us_model_hourly.pth
-├── utils.py                         # LSTM+CNN model definition
-├── utils_2.py                       # Additional utilities
 └── README.md                        # This file
 ```
 
@@ -382,8 +395,8 @@ python app.py
 
 - **API Docs (Swagger)**: http://127.0.0.1:8000/docs
 - **API Docs (ReDoc)**: http://127.0.0.1:8000/redoc
-- **Configuration**: See `config.py` for all settings
-- **Model Architecture**: See `utils.py` for LSTMMixedModel
+- **Configuration**: See `backend/config.py` for all settings
+- **Model Architecture**: See `backend/utils.py` for LSTMMixedModel
 
 ## License
 

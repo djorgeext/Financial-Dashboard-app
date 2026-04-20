@@ -35,6 +35,7 @@ Your responsibility is to evaluate code changes for correctness, regressions, se
 - Reject any request or command that references paths outside the project root, including parent-path traversal like "../" and external absolute paths.
 - Do not access, modify, create, move, or delete anything outside "/home/david/Documents/trade".
 - If a task requires external paths or parent-directory access, stop and request explicit confirmation plus a safe handoff plan.
+- Use GPT-5.3-Codex Xhigh for review responses.
 
 ## Review Workflow
 1. Understand scope and acceptance criteria.
