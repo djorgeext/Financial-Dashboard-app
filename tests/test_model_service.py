@@ -9,8 +9,8 @@ from pathlib import Path
 import tempfile
 import os
 
-from model_service import ModelService, create_model_service
-from utils import LSTMMixedModel
+from backend.model_service import ModelService, create_model_service
+from backend.utils import LSTMMixedModel
 
 
 @pytest.fixture

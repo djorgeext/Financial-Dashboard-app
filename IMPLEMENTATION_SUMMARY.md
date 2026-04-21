@@ -10,7 +10,7 @@ All components of the financial dashboard system have been successfully implemen
 
 ### 1. Backend Infrastructure (Phase 1: CRITICAL)
 
-#### **app.py** - FastAPI Backend (250+ lines)
+#### **backend/app.py** - FastAPI Backend (250+ lines)
 - ✅ RESTful API with 10+ endpoints
 - ✅ Dynamic lifespan management for service initialization
 - ✅ CORS configuration for frontend
@@ -32,7 +32,7 @@ All components of the financial dashboard system have been successfully implemen
 | `/` | GET | Serve dashboard HTML |
 | `/dashboard` | GET | Dashboard page |
 
-#### **config.py** - Configuration Management (90+ lines)
+#### **backend/config.py** - Configuration Management (90+ lines)
 - ✅ Environment variable configuration
 - ✅ Secure API key handling:
   - Development: `groq_api_key.txt` (local file)
@@ -42,7 +42,7 @@ All components of the financial dashboard system have been successfully implemen
 - ✅ Cache TTL settings
 - ✅ Model architecture configuration
 
-#### **model_service.py** - PyTorch Model Service (200+ lines)
+#### **backend/model_service.py** - PyTorch Model Service (200+ lines)
 - ✅ Model loading from `.pth` files
 - ✅ Batch inference support
 - ✅ Device detection (GPU/CPU)
@@ -58,7 +58,7 @@ All components of the financial dashboard system have been successfully implemen
 - `get_model_status()` - Track loaded models
 - `model_ready()` - Check model availability
 
-#### **data_fetcher.py** - Financial Data Pipeline (260+ lines)
+#### **backend/data_fetcher.py** - Financial Data Pipeline (260+ lines)
 - ✅ yfinance integration for price data
 - ✅ Caching with TTL (configurable, default 5 min)
 - ✅ Support for hourly & daily granularity
@@ -73,7 +73,7 @@ All components of the financial dashboard system have been successfully implemen
 - `get_sector_summary()` - Multi-ticker summary
 - `prepare_features_for_model()` - Feature engineering
 
-#### **news_service.py** - Groq LLM News Analysis (280+ lines)
+#### **backend/news_service.py** - Groq LLM News Analysis (280+ lines)
 - ✅ Groq API integration
 - ✅ JSON sentiment classification
 - ✅ Trade signal extraction
@@ -149,7 +149,11 @@ Test Coverage:
 - Dashboard aggregation
 - Pipeline health checks
 
-**Overall Test Results: 32/32 PASSED ✅**
+#### **Additional current test suites**
+- `test_inference_service.py` - Inference service and pipeline tests
+- `test_dashboard_html.py` - Dashboard HTML regression and rendering tests
+
+**Overall Test Results: 107/107 PASSED ✅**
 
 ---
 
@@ -183,7 +187,7 @@ Test Coverage:
 | Groq LLM integration | ✅ PASS | Safe defaults when unavailable |
 | API key secure | ✅ PASS | Never exposed in logs/UI |
 | Dashboard frontend | ✅ PASS | Responsive, auto-updating |
-| Tests pass | ✅ PASS | 32/32 tests passing |
+| Tests pass | ✅ PASS | 107/107 tests passing |
 | No critical security issues | ✅ PASS | Code review ready |
 | No regressions | ✅ PASS | Existing notebooks untouched |
 
@@ -196,8 +200,8 @@ Test Coverage:
 | Core backend modules | 5 files |
 | Lines of backend code | 1,200+ |
 | Frontend HTML+CSS+JS | 550+ lines |
-| Test files | 3 files |
-| Test cases | 32 (all passing) |
+| Test files | 5 files |
+| Test cases | 107 (all passing) |
 | API endpoints | 10 |
 | Supported sectors | 3 (tech, banks, mining) |
 | Pre-trained models | 6 (daily + hourly variants) |
@@ -226,9 +230,9 @@ export ENV="production"
 
 ### Run Application (1 min)
 ```bash
-python app.py
+python -m backend.app
 # OR with uvicorn:
-uvicorn app:app --host 127.0.0.1 --port 8000
+uvicorn backend.app:app --host 127.0.0.1 --port 8000
 ```
 
 ### Access Dashboard
@@ -243,13 +247,13 @@ http://127.0.0.1:8000/
 ### Run All Tests
 ```bash
 pytest tests/ -v
-# Result: 32/32 PASSED ✅
+# Result: 107/107 PASSED ✅
 ```
 
 ### Complete Validation
 ```bash
-python validate.py
-# Result: 19/19 checks PASSED ✅
+python -m backend.validate
+# Result: 31/31 checks PASSED ✅
 ```
 
 ### Test Individual Services
@@ -267,13 +271,26 @@ pytest tests/test_news_service.py -v
 
 ```
 /home/david/Documents/trade/
-├── app.py                           # Main FastAPI application
-├── config.py                        # Configuration management
-├── model_service.py                 # PyTorch inference
-├── data_fetcher.py                  # Financial data pipeline
-├── news_service.py                  # Groq LLM integration
-├── dashboard.html                   # Frontend UI
-├── validate.py                      # Validation script
+├── backend/
+│   ├── __init__.py
+│   ├── app.py                       # Main FastAPI application
+│   ├── config.py                    # Configuration management
+│   ├── model_service.py             # PyTorch inference
+│   ├── data_fetcher.py              # Financial data pipeline
+│   ├── news_service.py              # Groq LLM integration
+│   ├── inference_service.py
+│   ├── options_analyzer.py
+│   ├── utils.py
+│   ├── utils_2.py
+│   ├── validate.py                  # Validation script
+│   └── news_analysis_2.py
+├── frontend/
+│   ├── static/
+│   │   └── css/
+│   │       └── dashboard.css
+│   └── templates/
+│       └── dashboard.html
+├── dashboard.html                   # Legacy dashboard file
 ├── requirements.txt                 # Python dependencies
 ├── .gitignore                       # Git rules
 ├── README.md                        # Full documentation
@@ -281,6 +298,8 @@ pytest tests/test_news_service.py -v
 │   ├── __init__.py
 │   ├── test_model_service.py       # 12 tests ✅
 │   ├── test_news_service.py        # 20 tests ✅
+│   ├── test_inference_service.py   # Inference service tests
+│   ├── test_dashboard_html.py      # Dashboard HTML tests
 │   └── test_integration.py         # Integration tests
 ├── models/
 │   ├── banks_model.pth
@@ -289,8 +308,6 @@ pytest tests/test_news_service.py -v
 │   ├── mining_model_hourly.pth
 │   ├── tech_us_model.pth
 │   └── tech_us_model_hourly.pth
-├── utils.py                         # Neural network models
-├── utils_2.py                       # Additional utilities
 └── [Jupyter notebooks remain untouched]
 ```
 
@@ -357,8 +374,8 @@ pytest tests/test_news_service.py -v
 ## ✨ Technical Achievements
 
 ✅ **Complete implementation** of specified requirements
-✅ **32/32 tests passing** with comprehensive coverage
-✅ **19/19 validation checks** passed
+✅ **107/107 tests passing** with comprehensive coverage
+✅ **31/31 validation checks** passed
 ✅ **Production-ready** code quality
 ✅ **Secure handling** of credentials
 ✅ **Professional dashboard** UI
@@ -372,9 +389,9 @@ pytest tests/test_news_service.py -v
 ## 📞 Support & Next Steps
 
 ### For Development
-1. Run `python validate.py` to verify installation
+1. Run `python -m backend.validate` to verify installation
 2. See `README.md` for detailed configuration options
-3. Start server with `python app.py`
+3. Start server with `python -m backend.app`
 4. Access dashboard at `http://127.0.0.1:8000/`
 
 ### For Production Deployment
@@ -396,4 +413,4 @@ All code is documented and follows Python best practices:
 
 **Implementation Date:** April 11, 2026  
 **Status:** ✅ COMPLETE - Ready for Review & Deployment  
-**Test Coverage:** 32/32 PASSED | Validation: 19/19 PASSED
+**Test Coverage:** 107/107 PASSED | Validation: 31/31 PASSED

@@ -2,29 +2,32 @@
 Integration tests for the financial dashboard API.
 Tests end-to-end scenarios and API endpoint responses.
 """
+import json
 import pytest
 from unittest.mock import Mock, patch
 import os
 import tempfile
 from pathlib import Path
+import numpy as np
+import pandas as pd
 
 # Import after ensuring module path
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from app import app
-from config import Config
+from backend.app import app
+from backend.config import Config
 
 # Import TestClient
 from fastapi.testclient import TestClient
 
 # Initialize config and services before tests
-import app as app_module
+from backend import app as app_module
 if app_module.config is None:
-    from config import get_config
-    from model_service import create_model_service
-    from data_fetcher import create_data_fetcher
-    from news_service import create_news_service
+    from backend.config import get_config
+    from backend.model_service import create_model_service
+    from backend.data_fetcher import create_data_fetcher
+    from backend.news_service import create_news_service
     
     app_module.config = get_config()
     app_module.model_service = create_model_service(model_dir=app_module.config.MODEL_DIR)
@@ -741,6 +744,99 @@ class TestOptionsEndpoints:
         assert data["fallback_reason"] == "inference_failed_for_ticker"
         assert data["fallback_detail"] == "empty_suggestions"
         assert data["suggested_options"] == []
+
+    def test_options_endpoint_sanitizes_non_finite_values(self, client, monkeypatch):
+        mock_inference = Mock()
+        mock_inference.get_sector_ticker_mapping.return_value = {
+            "sectors": {
+                "banks": {"tickers": ["BAC"]}
+            }
+        }
+        mock_inference.build_options_analysis.return_value = {
+            "ticker": "BAC",
+            "sector": "banks",
+            "status": "success",
+            "movement_10h_pct": np.float64(np.nan),
+            "native_nan": float("nan"),
+            "native_inf": float("inf"),
+            "native_neg_inf": float("-inf"),
+            "pandas_na": pd.NA,
+            "pandas_nat": pd.NaT,
+            "table_rows": [
+                {
+                    "Fecha": "2026-04-12",
+                    "Ticker": "BAC",
+                    "Strike": np.float64(40.5),
+                    "Ask": np.float64(np.inf),
+                    "IV": np.float64(-np.inf),
+                    "Prob. Final (Bayes)": np.float64(np.nan),
+                    "Native NaN": float("nan"),
+                    "Native Inf": float("inf"),
+                    "Native -Inf": float("-inf"),
+                    "Pandas NA": pd.NA,
+                    "Pandas NaT": pd.NaT,
+                }
+            ],
+            "suggested_options": [
+                {
+                    "option_type": "call",
+                    "probability": np.float64(np.inf),
+                    "native_probability": float("-inf"),
+                    "nested_tuple": (
+                        np.float64(np.nan),
+                        1.0,
+                        pd.NA,
+                        pd.NaT,
+                        float("inf"),
+                        float("nan"),
+                    ),
+                }
+            ],
+            "metadata": {
+                "probs": np.array([0.7, np.nan, np.inf]),
+                "native_values": [float("nan"), float("inf"), float("-inf")],
+                "pandas_values": [pd.NA, pd.NaT],
+            },
+        }
+
+        mock_news = Mock()
+        mock_news.analyze_ticker_news.return_value = {
+            "sentiment": "neutral",
+            "sentiment_score": 0.0,
+            "summary": "Balanced headlines",
+            "status": "success",
+        }
+
+        monkeypatch.setattr(app_module, "inference_service", mock_inference)
+        monkeypatch.setattr(app_module, "news_service", mock_news)
+
+        response = client.get("/api/options/BAC")
+        assert response.status_code == 200
+
+        data = response.json()
+        assert data["movement_10h_pct"] is None
+        assert data["native_nan"] is None
+        assert data["native_inf"] is None
+        assert data["native_neg_inf"] is None
+        assert data["pandas_na"] is None
+        assert data["pandas_nat"] is None
+        assert data["table_rows"][0]["Strike"] == pytest.approx(40.5)
+        assert data["table_rows"][0]["Ask"] is None
+        assert data["table_rows"][0]["IV"] is None
+        assert data["table_rows"][0]["Prob. Final (Bayes)"] is None
+        assert data["table_rows"][0]["Native NaN"] is None
+        assert data["table_rows"][0]["Native Inf"] is None
+        assert data["table_rows"][0]["Native -Inf"] is None
+        assert data["table_rows"][0]["Pandas NA"] is None
+        assert data["table_rows"][0]["Pandas NaT"] is None
+        assert data["suggested_options"][0]["probability"] is None
+        assert data["suggested_options"][0]["native_probability"] is None
+        assert data["suggested_options"][0]["nested_tuple"] == [None, 1.0, None, None, None, None]
+        assert data["metadata"]["probs"] == [0.7, None, None]
+        assert data["metadata"]["native_values"] == [None, None, None]
+        assert data["metadata"]["pandas_values"] == [None, None]
+
+        json.dumps(data, allow_nan=False)
 
 
 class TestAggregatedDashboardEndpoint:

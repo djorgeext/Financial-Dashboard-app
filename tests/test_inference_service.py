@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-import inference_service as inference_module
+from backend import inference_service as inference_module
 
 
 

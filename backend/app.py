@@ -3,10 +3,11 @@ Financial Dashboard Backend API
 Main FastAPI application with endpoints for price data, forecasts, and sentiment.
 """
 import logging
+import math
 from pathlib import Path
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 import numpy as np
 
 from fastapi import FastAPI, HTTPException, Query, Path as FastApiPath
@@ -88,6 +89,36 @@ def _safe_float(value: Optional[float], default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return float(default)
+
+
+def _sanitize_non_finite_json_values(value: Any) -> Any:
+    """Recursively replace NaN/Inf values with None for JSON-safe responses."""
+    if isinstance(value, dict):
+        return {
+            key: _sanitize_non_finite_json_values(item)
+            for key, item in value.items()
+        }
+
+    if isinstance(value, list):
+        return [_sanitize_non_finite_json_values(item) for item in value]
+
+    if isinstance(value, tuple):
+        return [_sanitize_non_finite_json_values(item) for item in value]
+
+    if isinstance(value, np.ndarray):
+        return [_sanitize_non_finite_json_values(item) for item in value.tolist()]
+
+    if isinstance(value, np.generic):
+        return _sanitize_non_finite_json_values(value.item())
+
+    value_type = type(value)
+    if value_type.__module__.startswith("pandas") and value_type.__name__ in {"NAType", "NaTType"}:
+        return None
+
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+
+    return value
 
 
 def _is_forecast_neutral_or_no_signal(forecast: Dict) -> bool:
@@ -778,7 +809,7 @@ async def get_options_suggestions(ticker: str) -> Dict:
                     options["fallback_reason"] = fallback_reason
                 options["fallback_detail"] = fallback_failure_detail
 
-        return options
+        return _sanitize_non_finite_json_values(options)
     except HTTPException:
         raise
     except Exception as e:

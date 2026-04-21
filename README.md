@@ -125,20 +125,11 @@ NUM_CLASSES=3
 ### Development Server
 
 ```bash
-python app.py
-```
-
-`python app.py` remains the recommended local entrypoint. When `DEBUG=True`,
-the app now starts uvicorn reload mode using an import-string target that is
-compatible with reloader subprocesses.
-
-Optional package execution:
-```bash
 python -m backend.app
 ```
 
-Both commands run the same FastAPI backend implementation in
-`backend/app.py`; root `app.py` is a thin compatibility entrypoint.
+When `DEBUG=True`, the app starts uvicorn reload mode using an import-string
+target that is compatible with reloader subprocesses.
 
 Or with uvicorn directly:
 ```bash
@@ -152,6 +143,15 @@ The dashboard will be available at: `http://127.0.0.1:8000/`
 ```bash
 uvicorn backend.app:app --host 0.0.0.0 --port 8000 --workers 4
 ```
+
+## Migration notes
+
+Root wrapper modules were removed. Use backend module paths directly:
+
+- `python app.py` -> `python -m backend.app`
+- `python validate.py` -> `python -m backend.validate`
+- `from model_service import X` -> `from backend.model_service import X`
+- `from news_service import X` -> `from backend.news_service import X`
 
 ## API Endpoints
 
@@ -184,6 +184,14 @@ uvicorn backend.app:app --host 0.0.0.0 --port 8000 --workers 4
 - **GET `/api/news/{sector}`** - News sentiment analysis
   - Returns: sentiment (bullish/neutral/bearish), score, signals
 
+### Options
+
+- **GET `/api/options/{ticker}`** - Options strategy analysis for a ticker
+  - Returns suggested strategies (`suggested_options`)
+  - Returns options table data for UI consumption (`table_rows`)
+  - Can include explicit context fields such as `news`, `movement_10h_pct`, `confidence_daily`, and `confidence_hourly` when available
+  - May return statuses depending on pipeline outcome: `success` (analysis completed with option suggestions), `success_no_options` (analysis completed but no candidate met option filters), `success_no_signal` (analysis completed but no reliable signal), `success_fallback` (analysis completed using fallback payload), `error` (analysis failed and returns a frontend-compatible fallback payload)
+
 ### Dashboard
 
 - **GET `/api/dashboard`** - Aggregated view
@@ -213,6 +221,12 @@ curl http://127.0.0.1:8000/api/forecast/tech/daily
 
 ```bash
 curl http://127.0.0.1:8000/api/news/banks
+```
+
+### Get Options Suggestions for a Ticker
+
+```bash
+curl http://127.0.0.1:8000/api/options/BAC
 ```
 
 ## Testing
@@ -245,19 +259,19 @@ pytest tests/ --cov=. --cov-report=html
 
 ## Key Components
 
-### Root (`/`) compatibility layer
-- `app.py` is a thin compatibility entrypoint (`python app.py` delegates to `backend.app.main()`).
-- `config.py`, `model_service.py`, `data_fetcher.py`, `news_service.py`, and `news_analysis_2.py` are backward-compatible module wrappers.
-
 ### Backend implementation (`backend/`) - real application code
 - `backend/app.py`: FastAPI app, REST endpoints, CORS, and lifecycle wiring.
+- `backend/config.py`: environment configuration and secret loading.
 - `backend/model_service.py`: PyTorch model loading and inference.
 - `backend/data_fetcher.py`: yfinance data ingestion and caching.
 - `backend/news_service.py`: Groq LLM sentiment and signal extraction.
+- `backend/inference_service.py`: sector/ticker inference orchestration.
+- `backend/options_analyzer.py`: options strategy suggestions.
+- `backend/utils.py` and `backend/utils_2.py`: neural network and feature utilities.
+- `backend/validate.py`: implementation validator.
 - `backend/news_analysis_2.py`: import-safe shim for the legacy notebook artifact.
 
 ### `news_analysis_2.py` (legacy compatibility)
-- Root `news_analysis_2.py` remains a backward-compatible import alias
 - `backend/news_analysis_2.py` is import-safe and has no heavy side effects
 - Notebook-derived legacy content is kept in `legacy/news_analysis_2_legacy_notebook.txt`
 
@@ -306,11 +320,17 @@ Solution: Check internet connection and ticker symbols
 curl -X GET "http://127.0.0.1:8000/api/financial/summary/tech"
 ```
 
+### "Out of range float values are not JSON compliant" (NaN/Inf) on `/api/options/{ticker}`
+```
+Solution: The `/api/options/{ticker}` response now sanitizes non-finite numeric values (`NaN`, `Inf`, `-Inf`) to `null`.
+If many numeric fields are `null`, review upstream market/options/news sources for invalid values.
+```
+
 ### Port Already in Use
 ```bash
 # Change port
 export PORT=8001
-python app.py
+python -m backend.app
 ```
 
 ## Performance Optimization
@@ -336,6 +356,7 @@ python app.py
 2. **Single Ticker**: Forecasts show first ticker per sector (expandable)
 3. **Real-time**: Pull-based refresh (no streaming/WebSocket updates yet)
 4. **PyTorch Models**: Require significant memory (GPU recommended)
+5. **Non-finite Upstream Values (`/api/options/{ticker}`)**: In `/api/options/{ticker}`, some numeric fields may be `null` when upstream sources return non-finite values (`NaN`, `Inf`, `-Inf`)
 
 ## Future Enhancements
 
@@ -352,17 +373,11 @@ python app.py
 
 ```
 /home/david/Documents/trade/
-├── app.py                           # Backward-compatible entrypoint wrapper
-├── config.py                        # Backward-compatible module wrapper
-├── model_service.py                 # Backward-compatible module wrapper
-├── data_fetcher.py                  # Backward-compatible module wrapper
-├── news_service.py                  # Backward-compatible module wrapper
-├── news_analysis_2.py               # Backward-compatible module wrapper
 ├── backend/
 │   ├── __init__.py
 │   ├── app.py                       # FastAPI main application
 │   ├── config.py                    # Configuration & secrets
-│   ├── model_service.py             # PyTorch inference wrapper
+│   ├── model_service.py             # PyTorch inference
 │   ├── data_fetcher.py              # Financial data pipeline
 │   ├── news_service.py              # Groq LLM integration
 │   ├── inference_service.py
@@ -371,15 +386,23 @@ python app.py
 │   ├── utils_2.py
 │   ├── validate.py
 │   └── news_analysis_2.py           # Import-safe shim
+├── frontend/
+│   ├── static/
+│   │   └── css/
+│   │       └── dashboard.css
+│   └── templates/
+│       └── dashboard.html
 ├── legacy/
 │   └── news_analysis_2_legacy_notebook.txt
-├── dashboard.html                   # Frontend UI
+├── dashboard.html                   # Legacy dashboard file
 ├── requirements.txt                 # Python dependencies
 ├── .gitignore                       # Git exclusions
 ├── tests/
 │   ├── __init__.py
 │   ├── test_model_service.py        # Model service unit tests
 │   ├── test_news_service.py         # News service unit tests
+│   ├── test_inference_service.py    # Inference service tests
+│   ├── test_dashboard_html.py       # Dashboard HTML tests
 │   └── test_integration.py          # End-to-end API tests
 ├── models/
 │   ├── banks_model.pth

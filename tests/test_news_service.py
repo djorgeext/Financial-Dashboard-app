@@ -6,7 +6,7 @@ import pytest
 from datetime import datetime
 from unittest.mock import Mock, patch, MagicMock
 
-from news_service import NewsService, create_news_service
+from backend.news_service import NewsService, create_news_service
 
 
 @pytest.fixture
@@ -165,7 +165,7 @@ class TestNewsStatus:
 class TestAnalysisErrorHandling:
     """Tests for error handling in analysis."""
     
-    @patch('news_service.GROQ_AVAILABLE', True)
+    @patch('backend.news_service.GROQ_AVAILABLE', True)
     def test_analyze_news_json_parse_error(self):
         """Test handling of JSON parsing errors."""
         service = NewsService(api_key="mock_key")

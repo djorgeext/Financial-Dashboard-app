@@ -32,7 +32,7 @@ if BASE_PATH not in sys.path:
 
 # Importar funciones personalizadas
 try:
-    from utils_2 import (
+    from backend.utils_2 import (
         LSTMMixedModel,
         find_optimal_d,
         frac_diff_ffd,
@@ -46,9 +46,31 @@ try:
         get_barrier_probabilities,
         engineer_features
     )
-    print("✅ utils.py importado correctamente.")
-except ImportError as e:
-    print(f"❌ Error importando utils: {e}")
+    print("✅ backend.utils_2 importado correctamente.")
+except ImportError as backend_import_error:
+    try:
+        from utils_2 import (
+            LSTMMixedModel,
+            find_optimal_d,
+            frac_diff_ffd,
+            yang_zhang_volatility,
+            get_drift,
+            calculate_amihud_illiquidity,
+            calculate_vp_divergence_robust,
+            apply_robust_normalization,
+            get_sentiment_logits,
+            calculate_bayesian_final_probability,
+            get_barrier_probabilities,
+            engineer_features
+        )
+        print("✅ utils_2 importado correctamente (fallback legacy).")
+    except ImportError as legacy_import_error:
+        import_error_message = (
+            "❌ Error importando utilidades desde backend.utils_2 y fallback utils_2: "
+            f"{backend_import_error} | {legacy_import_error}"
+        )
+        print(import_error_message)
+        raise ImportError(import_error_message) from legacy_import_error
 
 # Configuración Global
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
